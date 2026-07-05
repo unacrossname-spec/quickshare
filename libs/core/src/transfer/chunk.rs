@@ -1,6 +1,6 @@
 use std::io;
 
-/// Split a reader into chunks.
+/// Split a reader into chunks, computing a BLAKE3 hash per chunk.
 pub struct ChunkReader<R> {
     inner: R,
     chunk_size: usize,
@@ -51,12 +51,13 @@ impl<R: io::Read> Iterator for ChunkReader<R> {
         }
 
         buf.truncate(total);
+        let hash = *blake3::hash(&buf).as_bytes();
 
         let chunk = Chunk {
             index: self.index,
             offset: self.offset,
             data: buf,
-            hash: [0u8; 32],
+            hash,
         };
 
         self.index += 1;
@@ -75,8 +76,8 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn verify(&self) -> bool {
-        // Hash verification not computed during transfer
-        true
+        let computed = *blake3::hash(&self.data).as_bytes();
+        computed == self.hash
     }
 }
 
