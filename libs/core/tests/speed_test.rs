@@ -120,3 +120,65 @@ async fn tcp_protocol_loopback_throughput() {
     println!("  Throughput:  {:.2} Mbps ({:.2} MB/s)", mbps, sent as f64 / secs / 1024.0 / 1024.0);
     println!("====================================================");
 }
+
+// ---------------------------------------------------------------------------
+// Multi-threaded runtime variant to compare
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mt_tcp_protocol_loopback_throughput() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let data = std::sync::Arc::new(vec![0xABu8; DATA_SIZE]);
+    let file_meta = FileMeta {
+        name: "speed_test.bin".into(),
+        size: DATA_SIZE as u64,
+        chunk_size: CHUNK_SIZE,
+        chunk_count: (DATA_SIZE + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
+        file_hash: [0u8; 32],
+    };
+    let start = Instant::now();
+
+    let send_h = tokio::spawn({
+        let data = data.clone();
+        async move {
+            let stream = quickshare_core::transport::TcpStream::connect(addr).await.unwrap();
+            let mut s = FileSender::new(stream, file_meta);
+            s.handshake().await.unwrap();
+            let reader = ChunkReader::new(&data[..], CHUNK_SIZE);
+            for ch in reader {
+                s.send_chunk(&ch.unwrap()).await.unwrap();
+            }
+            s.finish().await.unwrap();
+            s.bytes_sent()
+        }
+    });
+
+    let recv_h = tokio::spawn(async move {
+        let (raw, _) = listener.accept().await.unwrap();
+        let stream = quickshare_core::transport::TcpStream::new(raw);
+        let mut r = FileReceiver::new(stream);
+        r.handshake().await.unwrap();
+        loop {
+            match r.recv_chunk().await.unwrap() {
+                Some((_info, _data)) => {}
+                None => break,
+            }
+        }
+        r.bytes_received()
+    });
+
+    let (sent, _recvd) = tokio::join!(send_h, recv_h);
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64();
+    let sent = sent.unwrap();
+    let mbps = (sent as f64 * 8.0 / 1_000_000.0) / secs;
+
+    println!("=== TCP Protocol (multi-thread) Throughput ===");
+    println!("  Data:        {} MB", sent / 1024 / 1024);
+    println!("  Duration:    {:.2?}", elapsed);
+    println!("  Throughput:  {:.2} Mbps ({:.2} MB/s)", mbps, sent as f64 / secs / 1024.0 / 1024.0);
+    println!("==============================================");
+}

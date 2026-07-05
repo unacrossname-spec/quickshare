@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-sha2 = "0.10"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
