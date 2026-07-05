@@ -32,6 +32,11 @@ impl FileReceiver {
         Self { stream, file_meta: None, bytes_received: 0 }
     }
 
+    /// Create a receiver whose handshake was already read by the caller.
+    pub fn from_handshake(stream: TcpStream, file_meta: FileMeta) -> Self {
+        Self { stream, file_meta: Some(file_meta), bytes_received: 0 }
+    }
+
     /// Read the TransferRequest and send back an accept (JSON).
     pub async fn handshake(&mut self) -> Result<ControlMessage> {
         let msg: ControlMessage = recv_json(&mut self.stream).await?;

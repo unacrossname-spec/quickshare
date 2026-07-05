@@ -85,14 +85,14 @@ impl FileSender {
 // Length-prefixed JSON helpers (used for handshake only)
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn send_json(stream: &mut TcpStream, msg: &impl serde::Serialize) -> Result<()> {
+pub async fn send_json(stream: &mut TcpStream, msg: &impl serde::Serialize) -> Result<()> {
     let data = serde_json::to_vec(msg)?;
     stream.write_u32_le(data.len() as u32).await?;
     stream.write_all(&data).await?;
     Ok(())
 }
 
-pub(crate) async fn recv_json<T: serde::de::DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
+pub async fn recv_json<T: serde::de::DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
     use tokio::io::AsyncReadExt;
     let len = stream.read_u32_le().await?;
     let mut buf = vec![0u8; len as usize];
