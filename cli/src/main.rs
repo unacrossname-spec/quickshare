@@ -100,8 +100,15 @@ async fn handle_connection(
         let save_path = save_dir.unwrap_or_else(|| std::env::temp_dir());
         let out_path = save_path.join(&file_meta.name);
 
+        // If compressed, write to a temp file first so we can decompress in-place
+        let write_path = if file_meta.compressed {
+            out_path.with_extension("lz4.tmp")
+        } else {
+            out_path.clone()
+        };
+
         let start = Instant::now();
-        let mut file = tokio::fs::File::create(&out_path).await?;
+        let mut file = tokio::fs::File::create(&write_path).await?;
         let mut recvd = 0u64;
         let mut chunk_count = 0u64;
 
@@ -123,6 +130,15 @@ async fn handle_connection(
                 None => break,
             }
         }
+        drop(file);
+
+        // Decompress if needed
+        if file_meta.compressed {
+            let compressed_data = std::fs::read(&write_path)?;
+            let decompressed = quickshare_core::compress::decompress(&compressed_data)?;
+            tokio::fs::write(&out_path, &decompressed).await?;
+            tokio::fs::remove_file(&write_path).await?;
+        }
 
         let elapsed = start.elapsed();
         let secs = elapsed.as_secs_f64();
@@ -135,9 +151,18 @@ async fn handle_connection(
 }
 
 // -------- Client: send single file --------
-async fn run_send(addr: SocketAddr, file_path: PathBuf) -> anyhow::Result<()> {
+async fn run_send(addr: SocketAddr, file_path: PathBuf, compress: bool) -> anyhow::Result<()> {
     let data = std::fs::read(&file_path)?;
     let file_size = data.len();
+
+    // Optionally compress
+    let (send_data, is_compressed) = if compress {
+        let c = quickshare_core::compress::compress(&data);
+        let shrunk = c.len() < data.len();
+        (c, shrunk)
+    } else {
+        (data.clone(), false)
+    };
 
     let file_name = file_path
         .file_name()
@@ -149,20 +174,25 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf) -> anyhow::Result<()> {
         name: file_name,
         size: file_size as u64,
         chunk_size: CHUNK_SIZE,
-        chunk_count: (file_size + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
+        chunk_count: (send_data.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
+        compressed: is_compressed,
     };
+
+    let send_total = send_data.len();
 
     println!("[send] Connecting to {}...", addr);
     let stream = TcpStream::connect(addr).await?;
-    println!("[send] Connected!");
+    println!("[send] Connected!{}", if is_compressed {
+        format!(" (lz4: {} -> {} MB)", file_size / 1024 / 1024, send_total / 1024 / 1024)
+    } else { String::new() });
 
     let mut sender = FileSender::new(stream, file_meta);
     sender.handshake().await?;
 
     let start = Instant::now();
-    let reader = ChunkReader::new(&data[..], CHUNK_SIZE);
-    let total = data.len() as u64;
+    let reader = ChunkReader::new(&send_data[..], CHUNK_SIZE);
+    let total = send_total as u64;
 
     for (i, chunk) in reader.enumerate() {
         let chunk = chunk?;
@@ -189,7 +219,7 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf) -> anyhow::Result<()> {
 }
 
 // -------- Client: send directory --------
-async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf) -> anyhow::Result<()> {
+async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool) -> anyhow::Result<()> {
     if !dir_path.is_dir() {
         anyhow::bail!("not a directory: {}", dir_path.display());
     }
@@ -215,10 +245,12 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf) -> anyhow::Result<()>
 
     println!("[send-dir] Connecting to {}...", addr);
     let stream = TcpStream::connect(addr).await?;
-    println!("[send-dir] Connected! {} files, {} MB total",
-        files.len(), total_size / 1024 / 1024);
+    println!("[send-dir] Connected! {} files, {} MB total{}",
+        files.len(), total_size / 1024 / 1024,
+        if compress { " (lz4 on)" } else { "" });
 
-    let mut sender = BatchSender::new(stream, meta, CHUNK_SIZE);
+    let mut sender = BatchSender::new(stream, meta, CHUNK_SIZE)
+        .with_compression(compress);
     sender.handshake().await?;
 
     let start = Instant::now();
@@ -250,6 +282,22 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Return the Nth positional argument using the same indexing as `args[n]`,
+/// transparently skipping `--compress` flags.
+fn nth_non_flag(args: &[String], n: usize) -> anyhow::Result<String> {
+    let mut pos = 0;
+    for arg in args {
+        if arg == "--compress" {
+            continue;
+        }
+        if pos == n {
+            return Ok(arg.clone());
+        }
+        pos += 1;
+    }
+    anyhow::bail!("missing positional argument at index {}", n)
+}
+
 // -------- Main --------
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -258,10 +306,12 @@ async fn main() -> anyhow::Result<()> {
     if args.len() < 2 {
         eprintln!("Usage:");
         eprintln!("  quickshare-cli serve [--port PORT] [--save DIR]");
-        eprintln!("  quickshare-cli send <addr:port> <file>");
-        eprintln!("  quickshare-cli send-dir <addr:port> <directory>");
+        eprintln!("  quickshare-cli send [--compress] <addr:port> <file>");
+        eprintln!("  quickshare-cli send-dir [--compress] <addr:port> <directory>");
         return Ok(());
     }
+
+    let compress = args.iter().any(|a| a == "--compress");
 
     match args[1].as_str() {
         "serve" | "server" => {
@@ -275,6 +325,8 @@ async fn main() -> anyhow::Result<()> {
                 } else if args[i] == "--save" && i + 1 < args.len() {
                     save_dir = Some(PathBuf::from(&args[i + 1]));
                     i += 2;
+                } else if args[i] == "--compress" {
+                    i += 1;
                 } else {
                     i += 1;
                 }
@@ -283,25 +335,25 @@ async fn main() -> anyhow::Result<()> {
         }
         "send" | "client" => {
             if args.len() < 4 {
-                anyhow::bail!("Usage: quickshare-cli send <addr:port> <file>");
+                anyhow::bail!("Usage: quickshare-cli send [--compress] <addr:port> <file>");
             }
-            let addr: SocketAddr = args[2].parse()?;
-            let file = PathBuf::from(&args[3]);
+            let addr: SocketAddr = nth_non_flag(&args, 2)?.parse()?;
+            let file = PathBuf::from(nth_non_flag(&args, 3)?);
             if !file.exists() {
                 anyhow::bail!("File not found: {}", file.display());
             }
-            run_send(addr, file).await
+            run_send(addr, file, compress).await
         }
         "send-dir" => {
             if args.len() < 4 {
-                anyhow::bail!("Usage: quickshare-cli send-dir <addr:port> <directory>");
+                anyhow::bail!("Usage: quickshare-cli send-dir [--compress] <addr:port> <directory>");
             }
-            let addr: SocketAddr = args[2].parse()?;
-            let dir = PathBuf::from(&args[3]);
+            let addr: SocketAddr = nth_non_flag(&args, 2)?.parse()?;
+            let dir = PathBuf::from(nth_non_flag(&args, 3)?);
             if !dir.is_dir() {
                 anyhow::bail!("Directory not found: {}", dir.display());
             }
-            run_send_dir(addr, dir).await
+            run_send_dir(addr, dir, compress).await
         }
         _ => {
             anyhow::bail!("Unknown command: {}. Use 'serve', 'send', or 'send-dir'", args[1]);

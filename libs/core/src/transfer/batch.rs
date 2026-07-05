@@ -26,6 +26,8 @@ pub struct BatchMeta {
 pub struct FileEntry {
     pub relative_path: String,
     pub size: u64,
+    #[serde(default)]
+    pub compressed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -68,13 +70,19 @@ pub struct BatchSender {
     stream: TcpStream,
     meta: BatchMeta,
     chunk_size: usize,
+    compress: bool,
     files_sent: u32,
     bytes_sent: u64,
 }
 
 impl BatchSender {
     pub fn new(stream: TcpStream, meta: BatchMeta, chunk_size: usize) -> Self {
-        Self { stream, meta, chunk_size, files_sent: 0, bytes_sent: 0 }
+        Self { stream, meta, chunk_size, compress: false, files_sent: 0, bytes_sent: 0 }
+    }
+
+    pub fn with_compression(mut self, enabled: bool) -> Self {
+        self.compress = enabled;
+        self
     }
 
     pub async fn handshake(&mut self) -> Result<()> {
@@ -84,16 +92,25 @@ impl BatchSender {
     }
 
     pub async fn send_file(&mut self, relative_path: &str, data: &[u8]) -> Result<()> {
+        // Optionally compress
+        let send_data = if self.compress {
+            crate::compress::compress(data)
+        } else {
+            data.to_vec()
+        };
+        let compressed = send_data.len() < data.len();
+
         // File entry
         let entry = FileEntry {
             relative_path: relative_path.to_string(),
             size: data.len() as u64,
+            compressed,
         };
         send_json(&mut self.stream, &entry).await?;
         let _ack: Ack = recv_json(&mut self.stream).await?;
 
-        // Binary chunks
-        let reader = ChunkReader::new(data, self.chunk_size);
+        // Binary chunks (of possibly-compressed data)
+        let reader = ChunkReader::new(&send_data[..], self.chunk_size);
         for chunk in reader {
             let chunk = chunk?;
             let hdr = pack_header(CHUNK_TYPE, chunk.index, chunk.offset, chunk.data.len() as u32, &chunk.hash);
@@ -187,6 +204,12 @@ impl BatchReceiver {
         }
 
         self.bytes_received += data.len() as u64;
+
+        // Decompress if the file was compressed on the sender side
+        if entry.compressed {
+            data = crate::compress::decompress(&data)?;
+        }
+
         Ok(Some((entry.relative_path, data)))
     }
 
