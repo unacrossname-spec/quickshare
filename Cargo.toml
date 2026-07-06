@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["libs/core", "cli"]
+exclude = ["src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
