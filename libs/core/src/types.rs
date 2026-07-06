@@ -39,6 +39,8 @@ pub struct FileMeta {
     pub file_hash: [u8; 32],
     #[serde(default)]
     pub compressed: bool,
+    #[serde(default)]
+    pub bundle: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

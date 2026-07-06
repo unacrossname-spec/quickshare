@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod compress;
 pub mod types;
 pub mod transport;

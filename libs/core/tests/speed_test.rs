@@ -79,6 +79,8 @@ async fn tcp_protocol_loopback_throughput() {
         chunk_size: CHUNK_SIZE,
         chunk_count: (DATA_SIZE + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
+        compressed: false,
+        bundle: false,
     };
     let start = Instant::now();
 
@@ -138,6 +140,8 @@ async fn mt_tcp_protocol_loopback_throughput() {
         chunk_size: CHUNK_SIZE,
         chunk_count: (DATA_SIZE + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
+        compressed: false,
+        bundle: false,
     };
     let start = Instant::now();
 

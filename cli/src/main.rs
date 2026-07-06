@@ -136,8 +136,27 @@ async fn handle_connection(
         if file_meta.compressed {
             let compressed_data = std::fs::read(&write_path)?;
             let decompressed = quickshare_core::compress::decompress(&compressed_data)?;
-            tokio::fs::write(&out_path, &decompressed).await?;
             tokio::fs::remove_file(&write_path).await?;
+
+            if file_meta.bundle {
+                // Bundle mode: extract all files into a directory
+                let root_dir = &out_path;
+                tokio::fs::create_dir_all(root_dir).await?;
+                let files = quickshare_core::bundle::extract_bundle(&decompressed)?;
+                let file_count = files.len();
+                let mut total_bytes = 0u64;
+                for (rel_path, data) in files {
+                    let full_path = root_dir.join(&rel_path);
+                    if let Some(parent) = full_path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&full_path, &data).await?;
+                    total_bytes += data.len() as u64;
+                }
+                println!("\n[bundle] Extracted {} files, {} MB to {}", file_count, total_bytes / 1024 / 1024, root_dir.display());
+            } else {
+                tokio::fs::write(&out_path, &decompressed).await?;
+            }
         }
 
         let elapsed = start.elapsed();
@@ -145,7 +164,9 @@ async fn handle_connection(
         let mbps = (recvd as f64 * 8.0 / 1_000_000.0) / secs;
         println!("\n[receive] Done! {} MB in {:.2?} = {:.0} Mbps",
             recvd / 1024 / 1024, elapsed, mbps);
-        println!("[receive] Saved to: {}", out_path.display());
+        if !file_meta.bundle {
+            println!("[receive] Saved to: {}", out_path.display());
+        }
     }
     Ok(())
 }
@@ -177,6 +198,7 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf, compress: bool) -> anyho
         chunk_count: (send_data.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
         compressed: is_compressed,
+        bundle: false,
     };
 
     let send_total = send_data.len();
@@ -219,7 +241,7 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf, compress: bool) -> anyho
 }
 
 // -------- Client: send directory --------
-async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool) -> anyhow::Result<()> {
+async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundle: bool) -> anyhow::Result<()> {
     if !dir_path.is_dir() {
         anyhow::bail!("not a directory: {}", dir_path.display());
     }
@@ -237,6 +259,71 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool) -> an
         .unwrap_or("unknown")
         .to_string();
 
+    // ── Bundle mode: pack all files into one compressed blob, send as single file ──
+    if bundle {
+        // Read all files into memory
+        let mut entries = Vec::with_capacity(files.len());
+        for (rel_path, _) in &files {
+            let path = dir_path.join(rel_path);
+            let data = std::fs::read(&path)?;
+            entries.push((rel_path.to_string_lossy().to_string(), data));
+        }
+
+        let bundle_data = quickshare_core::bundle::create_bundle(&entries);
+        let compressed = quickshare_core::compress::compress(&bundle_data);
+        let raw_mb = bundle_data.len() / (1024 * 1024);
+        let comp_mb = compressed.len() / (1024 * 1024);
+
+        println!("[bundle] Packing {} files, {} -> {} MB (lz4)",
+            files.len(), raw_mb, comp_mb);
+
+        let file_meta = FileMeta {
+            name: root_name,
+            size: bundle_data.len() as u64,
+            chunk_size: CHUNK_SIZE,
+            chunk_count: (compressed.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
+            file_hash: [0u8; 32],
+            compressed: true,
+            bundle: true,
+        };
+
+        println!("[bundle] Connecting to {}...", addr);
+        let stream = TcpStream::connect(addr).await?;
+        println!("[bundle] Connected!");
+
+        let mut sender = FileSender::new(stream, file_meta);
+        sender.handshake().await?;
+
+        let start = Instant::now();
+        let reader = ChunkReader::new(&compressed[..], CHUNK_SIZE);
+        let total = compressed.len() as u64;
+
+        for (i, chunk) in reader.enumerate() {
+            let chunk = chunk?;
+            sender.send_chunk(&chunk).await?;
+            if (i + 1) % 16 == 0 {
+                let elapsed = start.elapsed().as_secs_f64();
+                let sent = sender.bytes_sent();
+                let mbps = (sent as f64 * 8.0 / 1_000_000.0) / elapsed.max(0.001);
+                print!("\r  Progress: {:.1}% | {:.0} Mbps",
+                    sent as f64 / total as f64 * 100.0, mbps);
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
+        }
+
+        sender.finish().await?;
+        let elapsed = start.elapsed();
+        let secs = elapsed.as_secs_f64();
+        let sent = sender.bytes_sent();
+        let mbps = (sent as f64 * 8.0 / 1_000_000.0) / secs;
+
+        println!("\n[bundle] Done! {} files ({} MB on wire) in {:.2?} = {:.0} Mbps",
+            files.len(), sent / 1024 / 1024, elapsed, mbps);
+        return Ok(());
+    }
+
+    // ── Legacy batch mode (per-file) ──
     let meta = BatchMeta {
         total_files: files.len() as u32,
         total_size,
@@ -283,11 +370,11 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool) -> an
 }
 
 /// Return the Nth positional argument using the same indexing as `args[n]`,
-/// transparently skipping `--compress` flags.
+/// transparently skipping `--compress` and `--bundle` flags.
 fn nth_non_flag(args: &[String], n: usize) -> anyhow::Result<String> {
     let mut pos = 0;
     for arg in args {
-        if arg == "--compress" {
+        if arg == "--compress" || arg == "--bundle" {
             continue;
         }
         if pos == n {
@@ -307,11 +394,12 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Usage:");
         eprintln!("  quickshare-cli serve [--port PORT] [--save DIR]");
         eprintln!("  quickshare-cli send [--compress] <addr:port> <file>");
-        eprintln!("  quickshare-cli send-dir [--compress] <addr:port> <directory>");
+        eprintln!("  quickshare-cli send-dir [--compress] [--bundle] <addr:port> <directory>");
         return Ok(());
     }
 
     let compress = args.iter().any(|a| a == "--compress");
+    let bundle = args.iter().any(|a| a == "--bundle");
 
     match args[1].as_str() {
         "serve" | "server" => {
@@ -325,7 +413,7 @@ async fn main() -> anyhow::Result<()> {
                 } else if args[i] == "--save" && i + 1 < args.len() {
                     save_dir = Some(PathBuf::from(&args[i + 1]));
                     i += 2;
-                } else if args[i] == "--compress" {
+                } else if args[i] == "--compress" || args[i] == "--bundle" {
                     i += 1;
                 } else {
                     i += 1;
@@ -346,14 +434,14 @@ async fn main() -> anyhow::Result<()> {
         }
         "send-dir" => {
             if args.len() < 4 {
-                anyhow::bail!("Usage: quickshare-cli send-dir [--compress] <addr:port> <directory>");
+                anyhow::bail!("Usage: quickshare-cli send-dir [--compress] [--bundle] <addr:port> <directory>");
             }
             let addr: SocketAddr = nth_non_flag(&args, 2)?.parse()?;
             let dir = PathBuf::from(nth_non_flag(&args, 3)?);
             if !dir.is_dir() {
                 anyhow::bail!("Directory not found: {}", dir.display());
             }
-            run_send_dir(addr, dir, compress).await
+            run_send_dir(addr, dir, compress, bundle).await
         }
         _ => {
             anyhow::bail!("Unknown command: {}. Use 'serve', 'send', or 'send-dir'", args[1]);
