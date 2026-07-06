@@ -287,6 +287,8 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
             bundle: true,
         };
 
+        let start = Instant::now();
+
         println!("[bundle] Connecting to {}...", addr);
         let stream = TcpStream::connect(addr).await?;
         println!("[bundle] Connected!");
@@ -294,7 +296,6 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
         let mut sender = FileSender::new(stream, file_meta);
         sender.handshake().await?;
 
-        let start = Instant::now();
         let reader = ChunkReader::new(&compressed[..], CHUNK_SIZE);
         let total = compressed.len() as u64;
 
@@ -302,8 +303,8 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
             let chunk = chunk?;
             sender.send_chunk(&chunk).await?;
             if (i + 1) % 16 == 0 {
-                let elapsed = start.elapsed().as_secs_f64();
                 let sent = sender.bytes_sent();
+                let elapsed = start.elapsed().as_secs_f64();
                 let mbps = (sent as f64 * 8.0 / 1_000_000.0) / elapsed.max(0.001);
                 print!("\r  Progress: {:.1}% | {:.0} Mbps",
                     sent as f64 / total as f64 * 100.0, mbps);
