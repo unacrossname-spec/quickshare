@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>LocalShare - 实时传输队列</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        body {
+            font-family: 'Hanken Grotesk', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #e2e8f0;
+            border-radius: 10px;
+        }
+        .progress-glow {
+            box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "tertiary": "#765a00",
+                      "outline": "#6b7a7d",
+                      "tertiary-fixed-dim": "#f3bf26",
+                      "surface-container-lowest": "#ffffff",
+                      "surface": "#f7f9fb",
+                      "on-surface": "#191c1e",
+                      "secondary-container": "#d0e1fb",
+                      "on-secondary-fixed": "#0b1c30",
+                      "secondary-fixed": "#d3e4fe",
+                      "on-primary-container": "#00626e",
+                      "primary-container": "#00e5ff",
+                      "on-tertiary": "#ffffff",
+                      "on-surface-variant": "#3b494c",
+                      "inverse-on-surface": "#eff1f3",
+                      "tertiary-container": "#fec931",
+                      "background": "#f7f9fb",
+                      "on-tertiary-fixed": "#251a00",
+                      "on-primary-fixed-variant": "#004f58",
+                      "surface-bright": "#f7f9fb",
+                      "on-secondary": "#ffffff",
+                      "on-error": "#ffffff",
+                      "surface-container-low": "#f2f4f6",
+                      "on-primary": "#ffffff",
+                      "secondary": "#505f76",
+                      "primary": "#006875",
+                      "on-secondary-fixed-variant": "#38485d",
+                      "surface-tint": "#006875",
+                      "surface-variant": "#e0e3e5",
+                      "primary-fixed": "#9cf0ff",
+                      "error": "#ba1a1a",
+                      "primary-fixed-dim": "#00daf3",
+                      "surface-container": "#eceef0",
+                      "error-container": "#ffdad6",
+                      "secondary-fixed-dim": "#b7c8e1",
+                      "on-tertiary-container": "#6f5500",
+                      "on-error-container": "#93000a",
+                      "on-primary-fixed": "#001f24",
+                      "on-background": "#191c1e",
+                      "tertiary-fixed": "#ffdf96",
+                      "surface-container-high": "#e6e8ea",
+                      "inverse-surface": "#2d3133",
+                      "on-tertiary-fixed-variant": "#594400",
+                      "inverse-primary": "#00daf3",
+                      "surface-dim": "#d8dadc",
+                      "on-secondary-container": "#54647a",
+                      "surface-container-highest": "#e0e3e5",
+                      "outline-variant": "#bac9cc"
+              },
+              "borderRadius": {
+                      "DEFAULT": "1rem",
+                      "lg": "2rem",
+                      "xl": "3rem",
+                      "full": "9999px"
+              },
+              "spacing": {
+                      "unit": "4px",
+                      "gutter": "16px",
+                      "margin-desktop": "32px",
+                      "container-max-width": "1100px",
+                      "margin-mobile": "16px"
+              },
+              "fontFamily": {
+                      "headline-lg-mobile": ["Hanken Grotesk"],
+                      "headline-lg": ["Hanken Grotesk"],
+                      "body-lg": ["Hanken Grotesk"],
+                      "label-md": ["Hanken Grotesk"],
+                      "label-sm": ["Hanken Grotesk"],
+                      "headline-md": ["Hanken Grotesk"],
+                      "body-md": ["Hanken Grotesk"]
+              },
+              "fontSize": {
+                      "headline-lg-mobile": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                      "headline-lg": ["30px", {"lineHeight": "38px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                      "body-lg": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                      "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.02em", "fontWeight": "500"}],
+                      "label-sm": ["11px", {"lineHeight": "14px", "fontWeight": "600"}],
+                      "headline-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                      "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}]
+              }
+            },
+          },
+        }
+    </script>
+</head>
+<body class="bg-surface text-on-surface">
+<div class="flex min-h-screen">
+<!-- Side Navigation Shell -->
+<aside class="hidden md:flex flex-col h-screen w-64 border-r border-outline-variant bg-surface p-4 gap-2 fixed left-0 top-0 z-50">
+<div class="mb-8 px-2">
+<h1 class="font-headline-md text-headline-md text-primary">LocalShare</h1>
+<p class="font-body-md text-body-md text-on-surface-variant">极简分享</p>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant transition-colors duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">home</span>
+<span class="font-body-md text-body-md">首页</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 bg-secondary-container text-on-secondary-container font-bold rounded-lg transition-transform active:scale-[0.98]" href="#">
+<span class="material-symbols-outlined">swap_horiz</span>
+<span class="font-body-md text-body-md">传输队列</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant transition-colors duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="font-body-md text-body-md">历史记录</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant transition-colors duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-body-md text-body-md">设置</span>
+</a>
+</nav>
+<div class="mt-auto p-4 bg-surface-container-low rounded-lg">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container">
+<span class="material-symbols-outlined">person</span>
+</div>
+<div>
+<p class="font-label-sm text-label-sm font-bold">本地用户</p>
+<p class="text-[10px] text-outline">192.168.1.15</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 md:ml-64 bg-surface min-h-screen">
+<!-- Top App Bar -->
+<header class="flex justify-between items-center px-margin-desktop w-full h-16 bg-surface z-40 sticky top-0">
+<div class="flex items-center gap-4">
+<h2 class="font-headline-md text-headline-md font-bold text-on-surface">传输队列</h2>
+</div>
+<div class="flex items-center gap-4">
+<button class="w-10 h-10 flex items-center justify-center rounded-full hover:opacity-80 transition-opacity active:opacity-70 text-on-surface-variant">
+<span class="material-symbols-outlined">wifi</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-full hover:opacity-80 transition-opacity active:opacity-70 text-on-surface-variant">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-full hover:opacity-80 transition-opacity active:opacity-70 text-on-surface-variant">
+<span class="material-symbols-outlined">account_circle</span>
+</button>
+</div>
+</header>
+<div class="max-w-[800px] mx-auto px-margin-mobile md:px-margin-desktop py-8">
+<!-- Active Transfer Section -->
+<section class="mb-12">
+<div class="flex items-end justify-between mb-4">
+<h3 class="font-label-md text-label-md text-primary font-bold uppercase tracking-wider">正在传输</h3>
+<div class="flex gap-4">
+<span class="font-body-md text-body-md text-on-surface-variant">12.5 MB/s</span>
+<span class="font-body-md text-body-md text-on-surface-variant">剩余 01:42</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-6 rounded-lg group hover:border-primary-container transition-colors duration-300">
+<div class="flex items-center gap-4 mb-6">
+<div class="w-12 h-12 bg-primary-container/20 rounded flex items-center justify-center text-primary">
+<span class="material-symbols-outlined" style="font-size: 32px;">description</span>
+</div>
+<div class="flex-1">
+<h4 class="font-headline-md text-headline-md text-on-surface truncate">Project_Final_Presentation_2024.zip</h4>
+<p class="font-body-md text-body-md text-on-surface-variant">发送至: Macbook Pro (Studio)</p>
+</div>
+<div class="flex gap-2">
+<button class="w-10 h-10 rounded-full border border-outline-variant flex items-center justify-center hover:bg-surface-container transition-colors">
+<span class="material-symbols-outlined">pause</span>
+</button>
+<button class="w-10 h-10 rounded-full border border-outline-variant flex items-center justify-center hover:bg-error-container hover:text-error transition-colors">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+</div>
+<!-- Premium Single Progress Bar -->
+<div class="relative w-full h-1.5 bg-surface-container rounded-full overflow-hidden">
+<div class="absolute top-0 left-0 h-full bg-primary-container progress-glow transition-all duration-500 ease-out" id="progress-bar" style="width: 64%;"></div>
+</div>
+<div class="mt-2 flex justify-between">
+<span class="font-label-sm text-label-sm text-primary font-bold">64%</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">842 MB / 1.3 GB</span>
+</div>
+</div>
+</section>
+<!-- Queue Stats & Action Chips -->
+<div class="flex flex-wrap gap-2 mb-8">
+<span class="px-3 py-1 bg-surface-container-high text-on-surface rounded-full font-label-md text-label-md flex items-center gap-2">
+<span class="material-symbols-outlined text-[14px]">list_alt</span>
+                    队列中: 4
+                </span>
+<span class="px-3 py-1 bg-surface-container-high text-on-surface rounded-full font-label-md text-label-md flex items-center gap-2">
+<span class="material-symbols-outlined text-[14px]">timer</span>
+                    预计总时长: 12min
+                </span>
+<button class="ml-auto px-3 py-1 text-primary font-label-md text-label-md hover:underline">
+                    全部暂停
+                </button>
+<button class="px-3 py-1 text-error font-label-md text-label-md hover:underline">
+                    清空队列
+                </button>
+</div>
+<!-- Pending Queue -->
+<section>
+<h3 class="font-label-md text-label-md text-on-surface-variant font-bold uppercase tracking-wider mb-4 px-2">等待队列</h3>
+<div class="space-y-1">
+<!-- Queue Item 1 -->
+<div class="flex items-center gap-4 p-4 hover:bg-surface-container-low rounded-lg transition-colors group">
+<span class="material-symbols-outlined text-outline">image</span>
+<div class="flex-1 min-w-0">
+<p class="font-body-md text-body-md text-on-surface truncate">IMG_8842_Shot_on_iPhone.heic</p>
+<p class="text-[11px] text-outline">4.2 MB • 准备就绪</p>
+</div>
+<div class="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-surface-variant text-on-surface-variant">
+<span class="material-symbols-outlined text-[18px]">drag_handle</span>
+</button>
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-error-container hover:text-error">
+<span class="material-symbols-outlined text-[18px]">delete</span>
+</button>
+</div>
+</div>
+<!-- Queue Item 2 -->
+<div class="flex items-center gap-4 p-4 hover:bg-surface-container-low rounded-lg transition-colors group">
+<span class="material-symbols-outlined text-outline">movie</span>
+<div class="flex-1 min-w-0">
+<p class="font-body-md text-body-md text-on-surface truncate">Summer_Vlog_Draft_01.mp4</p>
+<p class="text-[11px] text-outline">412 MB • 等待中</p>
+</div>
+<div class="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-surface-variant text-on-surface-variant">
+<span class="material-symbols-outlined text-[18px]">drag_handle</span>
+</button>
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-error-container hover:text-error">
+<span class="material-symbols-outlined text-[18px]">delete</span>
+</button>
+</div>
+</div>
+<!-- Queue Item 3 -->
+<div class="flex items-center gap-4 p-4 hover:bg-surface-container-low rounded-lg transition-colors group">
+<span class="material-symbols-outlined text-outline">folder_zip</span>
+<div class="flex-1 min-w-0">
+<p class="font-body-md text-body-md text-on-surface truncate">Assets_Library_Backup.zip</p>
+<p class="text-[11px] text-outline">2.1 GB • 等待中</p>
+</div>
+<div class="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-surface-variant text-on-surface-variant">
+<span class="material-symbols-outlined text-[18px]">drag_handle</span>
+</button>
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-error-container hover:text-error">
+<span class="material-symbols-outlined text-[18px]">delete</span>
+</button>
+</div>
+</div>
+<!-- Queue Item 4 -->
+<div class="flex items-center gap-4 p-4 hover:bg-surface-container-low rounded-lg transition-colors group">
+<span class="material-symbols-outlined text-outline">audio_file</span>
+<div class="flex-1 min-w-0">
+<p class="font-body-md text-body-md text-on-surface truncate">Podcast_Interview_Raw.wav</p>
+<p class="text-[11px] text-outline">86 MB • 等待中</p>
+</div>
+<div class="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-surface-variant text-on-surface-variant">
+<span class="material-symbols-outlined text-[18px]">drag_handle</span>
+</button>
+<button class="w-8 h-8 rounded-full flex items-center justify-center hover:bg-error-container hover:text-error">
+<span class="material-symbols-outlined text-[18px]">delete</span>
+</button>
+</div>
+</div>
+</div>
+</section>
+<!-- Floating Empty State / Finished State Visualization -->
+<div class="mt-16 flex flex-col items-center justify-center p-12 border-2 border-dashed border-outline-variant rounded-lg">
+<span class="material-symbols-outlined text-outline text-[48px] mb-4">upload_file</span>
+<p class="font-headline-md text-headline-md text-on-surface-variant mb-2">拖拽文件到此处</p>
+<p class="font-body-md text-body-md text-outline">或者点击上方“发送”按钮添加更多文件</p>
+</div>
+</div>
+</main>
+<!-- Bottom NavBar (Mobile Only) -->
+<nav class="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-surface border-t border-outline-variant flex items-center justify-around z-50">
+<a class="flex flex-col items-center gap-1 text-on-surface-variant" href="#">
+<span class="material-symbols-outlined">home</span>
+<span class="font-label-sm text-[10px]">首页</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-primary" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">swap_horiz</span>
+<span class="font-label-sm text-[10px]">传输</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-on-surface-variant" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-sm text-[10px]">历史</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-on-surface-variant" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-label-sm text-[10px]">设置</span>
+</a>
+</nav>
+</div>
+<!-- Micro-interactions Script -->
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const progressBar = document.getElementById('progress-bar');
+        let progress = 64;
+
+        // Simple mock animation for the progress bar
+        setInterval(() => {
+            if (progress < 99) {
+                progress += (Math.random() * 0.5);
+                progressBar.style.width = `${progress}%`;
+            }
+        }, 1000);
+
+        // Add hover sound or slight haptic feedback logic if needed (simulated)
+        const buttons = document.querySelectorAll('button');
+        buttons.forEach(btn => {
+            btn.addEventListener('mouseenter', () => {
+                // Light interaction logic here
+            });
+        });
+    });
+</script>
+</body></html>

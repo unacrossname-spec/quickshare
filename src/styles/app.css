@@ -1,0 +1,95 @@
+/* QuickShare - Modern Minimalist Design */
+body { font-family: 'Hanken Grotesk', sans-serif; }
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #bac9cc; border-radius: 10px; }
+
+/* Navigation active state */
+.nav-item.active {
+  background-color: #d0e1fb;
+  color: #004f58;
+  font-weight: 700;
+}
+.nav-item.active .material-symbols-outlined {
+  font-variation-settings: 'FILL' 1;
+}
+.nav-item:not(.active):hover {
+  background-color: #e0e3e5;
+}
+
+/* Toggle switch */
+.toggle {
+  appearance: none;
+  width: 44px; height: 24px;
+  background: #e0e3e5;
+  border-radius: 9999px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 20px; height: 20px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+.toggle:checked { background: #006875; }
+.toggle:checked::after { transform: translateX(20px); }
+
+/* Progress bar */
+.progress-bar {
+  height: 6px;
+  background: #eceef0;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #00e5ff;
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+}
+.progress-bar-fill.complete { background: #006875; }
+
+/* Device card */
+.device-card {
+  transition: all 0.2s;
+}
+.device-card:hover {
+  border-color: #006875;
+}
+
+/* Button press */
+button:active { transform: scale(0.97); }
+
+/* Peer dot */
+.peer-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.peer-dot.online { background: #22c55e; }
+.peer-dot.offline { background: #bac9cc; }
+
+/* Animation */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.page:not(.hidden) > * { animation: fadeIn 0.2s ease; }
+
+/* Search pulse */
+@keyframes ping {
+  0% { transform: scale(0.95); opacity: 0.5; }
+  50% { transform: scale(1.1); opacity: 0.15; }
+  100% { transform: scale(0.95); opacity: 0.5; }
+}
+.animate-ping { animation: ping 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }

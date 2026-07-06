@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>LocalShare - 设备发现</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "tertiary": "#765a00",
+                    "outline": "#6b7a7d",
+                    "tertiary-fixed-dim": "#f3bf26",
+                    "surface-container-lowest": "#ffffff",
+                    "surface": "#f7f9fb",
+                    "on-surface": "#191c1e",
+                    "secondary-container": "#d0e1fb",
+                    "on-secondary-fixed": "#0b1c30",
+                    "secondary-fixed": "#d3e4fe",
+                    "on-primary-container": "#00626e",
+                    "primary-container": "#00e5ff",
+                    "on-tertiary": "#ffffff",
+                    "on-surface-variant": "#3b494c",
+                    "inverse-on-surface": "#eff1f3",
+                    "tertiary-container": "#fec931",
+                    "background": "#f7f9fb",
+                    "on-tertiary-fixed": "#251a00",
+                    "on-primary-fixed-variant": "#004f58",
+                    "surface-bright": "#f7f9fb",
+                    "on-secondary": "#ffffff",
+                    "on-error": "#ffffff",
+                    "surface-container-low": "#f2f4f6",
+                    "on-primary": "#ffffff",
+                    "secondary": "#505f76",
+                    "primary": "#006875",
+                    "on-secondary-fixed-variant": "#38485d",
+                    "surface-tint": "#006875",
+                    "surface-variant": "#e0e3e5",
+                    "primary-fixed": "#9cf0ff",
+                    "error": "#ba1a1a",
+                    "primary-fixed-dim": "#00daf3",
+                    "surface-container": "#eceef0",
+                    "error-container": "#ffdad6",
+                    "secondary-fixed-dim": "#b7c8e1",
+                    "on-tertiary-container": "#6f5500",
+                    "on-error-container": "#93000a",
+                    "on-primary-fixed": "#001f24",
+                    "on-background": "#191c1e",
+                    "tertiary-fixed": "#ffdf96",
+                    "surface-container-high": "#e6e8ea",
+                    "inverse-surface": "#2d3133",
+                    "on-tertiary-fixed-variant": "#594400",
+                    "inverse-primary": "#00daf3",
+                    "surface-dim": "#d8dadc",
+                    "on-secondary-container": "#54647a",
+                    "surface-container-highest": "#e0e3e5",
+                    "outline-variant": "#bac9cc"
+            },
+            "borderRadius": {
+                    "DEFAULT": "1rem",
+                    "lg": "2rem",
+                    "xl": "3rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "unit": "4px",
+                    "gutter": "16px",
+                    "margin-desktop": "32px",
+                    "container-max-width": "1100px",
+                    "margin-mobile": "16px"
+            },
+            "fontFamily": {
+                    "headline-lg": ["Hanken Grotesk"],
+                    "headline-md": ["Hanken Grotesk"],
+                    "body-lg": ["Hanken Grotesk"],
+                    "body-md": ["Hanken Grotesk"],
+                    "label-md": ["Hanken Grotesk"],
+                    "label-sm": ["Hanken Grotesk"]
+            }
+          }
+        }
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .search-pulse {
+            animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); opacity: 0.5; }
+            50% { transform: scale(1.05); opacity: 0.2; }
+            100% { transform: scale(0.95); opacity: 0.5; }
+        }
+        .drag-area-active {
+            background-color: rgba(0, 229, 255, 0.05);
+            border: 2px dashed #00daf3;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body-md overflow-hidden h-screen flex">
+<!-- SideNavBar (Shared Component) -->
+<aside class="flex flex-col h-full p-4 gap-2 h-screen w-64 border-r border-outline-variant bg-surface-container-low">
+<div class="px-2 py-4 mb-4 flex items-center gap-3">
+<img alt="LocalShare Logo" class="w-10 h-10 rounded-lg object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLtTS0pZtzPG9Zx-TLNoH_QI8RDvUcgvTHswcLUdYbJggGR0Zbg_h0bU13-Y88kXmZJo2v77u9IazHmp3X4PiNr8V7hicmrOokEEsIC1HaX5Ce35bmY3ojkN155EtQZf2e7vCG24UJASgA3vAul_Lcr546zEQiBbasC2g6tJh_KUFxcCxgj7G5OhJ7RAkMOrFsw48x-qDf0VHRWf77XvVFDUcbWJWyz4R-CqsUWC09WO6O5u5PyI5ABMQPk"/>
+<div>
+<h1 class="font-headline-md text-headline-md text-primary leading-none">LocalShare</h1>
+<p class="font-label-sm text-label-sm text-outline">极简分享</p>
+</div>
+</div>
+<nav class="flex-1 space-y-1">
+<!-- Home (Active) -->
+<a class="flex items-center gap-3 px-4 py-3 bg-secondary-container text-on-secondary-container font-bold rounded-lg transition-transform active:scale-[0.98]" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">home</span>
+<span class="font-body-md text-body-md">主页</span>
+</a>
+<!-- Transfers -->
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-colors duration-200" href="#">
+<span class="material-symbols-outlined">swap_horiz</span>
+<span class="font-body-md text-body-md">传输</span>
+</a>
+<!-- History -->
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-colors duration-200" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="font-body-md text-body-md">历史记录</span>
+</a>
+<!-- Settings -->
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-colors duration-200" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-body-md text-body-md">设置</span>
+</a>
+</nav>
+<div class="mt-auto p-4 bg-surface-container rounded-xl border border-outline-variant/30">
+<div class="flex items-center gap-3 mb-2">
+<div class="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container font-bold">M</div>
+<div class="flex-1 overflow-hidden">
+<p class="font-label-md text-label-md truncate">我的设备</p>
+<p class="font-label-sm text-label-sm text-outline truncate">192.168.1.105</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="flex-1 flex flex-col relative overflow-hidden">
+<!-- TopNavBar (Shared Component) -->
+<header class="flex justify-between items-center px-margin-desktop w-full h-16 bg-surface z-10">
+<div class="flex items-center gap-4">
+<h2 class="font-headline-md text-headline-md font-bold text-on-surface">设备发现</h2>
+</div>
+<div class="flex items-center gap-4 text-on-surface-variant">
+<button class="p-2 hover:opacity-80 transition-opacity active:opacity-70">
+<span class="material-symbols-outlined">wifi</span>
+</button>
+<button class="p-2 hover:opacity-80 transition-opacity active:opacity-70">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="p-2 hover:opacity-80 transition-opacity active:opacity-70">
+<span class="material-symbols-outlined">account_circle</span>
+</button>
+</div>
+</header>
+<!-- Discovery Canvas -->
+<section class="flex-1 overflow-y-auto px-margin-desktop py-8 max-w-[1100px] mx-auto w-full">
+<!-- Searching Status -->
+<div class="flex flex-col items-center justify-center mb-12 space-y-4">
+<div class="relative w-24 h-24 flex items-center justify-center">
+<div class="absolute inset-0 bg-primary-container rounded-full opacity-20 search-pulse"></div>
+<div class="absolute inset-2 bg-primary-container rounded-full opacity-40 search-pulse" style="animation-delay: 0.5s"></div>
+<div class="w-12 h-12 bg-primary rounded-full flex items-center justify-center text-white z-10">
+<span class="material-symbols-outlined">radar</span>
+</div>
+</div>
+<div class="text-center">
+<h3 class="font-headline-md text-headline-md text-on-surface">正在寻找设备...</h3>
+<p class="font-body-md text-body-md text-outline">请确保其他设备也在同一网络下并开启了 LocalShare</p>
+</div>
+</div>
+<!-- Device Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter">
+<!-- Device Card 1 -->
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl flex items-center gap-4 hover:border-primary transition-colors cursor-pointer group">
+<div class="w-12 h-12 bg-surface-container-high rounded-full flex items-center justify-center text-on-surface-variant group-hover:bg-secondary-container group-hover:text-primary transition-colors">
+<span class="material-symbols-outlined">laptop_mac</span>
+</div>
+<div class="flex-1">
+<h4 class="font-body-lg text-body-lg font-bold">MacBook Pro</h4>
+<p class="font-label-md text-label-md text-outline">192.168.1.12</p>
+</div>
+<button class="px-4 py-2 bg-primary-container text-on-primary-container font-label-md text-label-md rounded-full hover:bg-primary hover:text-white transition-colors">
+                        发送
+                    </button>
+</div>
+<!-- Device Card 2 -->
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl flex items-center gap-4 hover:border-primary transition-colors cursor-pointer group">
+<div class="w-12 h-12 bg-surface-container-high rounded-full flex items-center justify-center text-on-surface-variant group-hover:bg-secondary-container group-hover:text-primary transition-colors">
+<span class="material-symbols-outlined">smartphone</span>
+</div>
+<div class="flex-1">
+<h4 class="font-body-lg text-body-lg font-bold">iPhone 15 Pro</h4>
+<p class="font-label-md text-label-md text-outline">192.168.1.15</p>
+</div>
+<button class="px-4 py-2 bg-primary-container text-on-primary-container font-label-md text-label-md rounded-full hover:bg-primary hover:text-white transition-colors">
+                        发送
+                    </button>
+</div>
+<!-- Device Card 3 -->
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl flex items-center gap-4 hover:border-primary transition-colors cursor-pointer group">
+<div class="w-12 h-12 bg-surface-container-high rounded-full flex items-center justify-center text-on-surface-variant group-hover:bg-secondary-container group-hover:text-primary transition-colors">
+<span class="material-symbols-outlined">tablet_android</span>
+</div>
+<div class="flex-1">
+<h4 class="font-body-lg text-body-lg font-bold">Galaxy Tab S9</h4>
+<p class="font-label-md text-label-md text-outline">192.168.1.18</p>
+</div>
+<button class="px-4 py-2 bg-primary-container text-on-primary-container font-label-md text-label-md rounded-full hover:bg-primary hover:text-white transition-colors">
+                        发送
+                    </button>
+</div>
+<!-- Device Card 4 -->
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl flex items-center gap-4 hover:border-primary transition-colors cursor-pointer group opacity-60">
+<div class="w-12 h-12 bg-surface-container-high rounded-full flex items-center justify-center text-on-surface-variant group-hover:bg-secondary-container group-hover:text-primary transition-colors">
+<span class="material-symbols-outlined">desktop_windows</span>
+</div>
+<div class="flex-1">
+<h4 class="font-body-lg text-body-lg font-bold">Workstation</h4>
+<p class="font-label-md text-label-md text-outline">192.168.1.5</p>
+</div>
+<button class="px-4 py-2 bg-surface-variant text-on-surface-variant font-label-md text-label-md rounded-full cursor-not-allowed">
+                        离线
+                    </button>
+</div>
+</div>
+</section>
+<!-- Drop Zone -->
+<footer class="p-margin-desktop mt-auto">
+<div class="relative overflow-hidden group border-2 border-dashed border-outline-variant rounded-xl bg-surface-container-low transition-all duration-300 hover:border-primary hover:bg-surface-container py-12 flex flex-col items-center justify-center gap-4 cursor-pointer" id="drop-zone">
+<div class="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform">
+<span class="material-symbols-outlined text-primary text-4xl">upload_file</span>
+</div>
+<div class="text-center">
+<p class="font-headline-md text-headline-md text-on-surface">将文件拖放至此处开始传输</p>
+<p class="font-body-md text-body-md text-outline mt-1">或者点击选择文件直接发送</p>
+</div>
+<input class="absolute inset-0 opacity-0 cursor-pointer" id="file-input" multiple="" type="file"/>
+</div>
+<div class="flex justify-between items-center mt-6 text-outline font-label-md">
+<p>当前网络: <strong>Home_WiFi_5G</strong></p>
+<p>已通过加密隧道保护传输</p>
+</div>
+</footer>
+</main>
+<script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.add('drag-area-active');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.remove('drag-area-active');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles(files);
+        }, false);
+
+        fileInput.addEventListener('change', function() {
+            handleFiles(this.files);
+        });
+
+        function handleFiles(files) {
+            if (files.length > 0) {
+                console.log(`Preparing to send ${files.length} files...`);
+                // Interactive feedback
+                const textElem = dropZone.querySelector('.text-on-surface');
+                textElem.innerText = `已准备好 ${files.length} 个文件`;
+                setTimeout(() => {
+                    textElem.innerText = '将文件拖放至此处开始传输';
+                }, 3000);
+            }
+        }
+
+        // Simulating Micro-interactions for Send Buttons
+        document.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('mousedown', () => {
+                btn.style.transform = 'scale(0.96)';
+            });
+            btn.addEventListener('mouseup', () => {
+                btn.style.transform = 'scale(1)';
+            });
+            btn.addEventListener('mouseleave', () => {
+                btn.style.transform = 'scale(1)';
+            });
+        });
+    </script>
+</body></html>
