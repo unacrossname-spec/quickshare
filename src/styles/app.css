@@ -21,27 +21,27 @@ body { font-family: 'Hanken Grotesk', sans-serif; }
 
 /* Toggle switch */
 .toggle {
-  appearance: none;
+  display: inline-flex; align-items: center;
   width: 44px; height: 24px;
   background: #e0e3e5;
   border-radius: 9999px;
-  position: relative;
   cursor: pointer;
   transition: background 0.2s;
   flex-shrink: 0;
+  position: relative;
 }
 .toggle::after {
   content: '';
-  position: absolute;
-  top: 2px; left: 2px;
   width: 20px; height: 20px;
   background: white;
   border-radius: 50%;
+  position: absolute;
+  top: 2px; left: 2px;
   transition: transform 0.2s;
   box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
-.toggle:checked { background: #006875; }
-.toggle:checked::after { transform: translateX(20px); }
+.toggle.on { background: #006875; }
+.toggle.on::after { transform: translateX(20px); }
 
 /* Progress bar */
 .progress-bar {
@@ -68,7 +68,13 @@ body { font-family: 'Hanken Grotesk', sans-serif; }
 }
 
 /* Button press */
-button:active { transform: scale(0.97); }
+button:active, .device-card:active { transform: scale(0.97); }
+
+/* Drag-over state */
+#drop-zone.drag-over {
+  border-color: #006875;
+  background-color: rgba(0, 229, 255, 0.05);
+}
 
 /* Peer dot */
 .peer-dot {

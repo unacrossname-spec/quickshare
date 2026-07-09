@@ -23,6 +23,7 @@ pub struct AppState {
     pub server_shutdown: Arc<AtomicBool>,
     pub save_dir: Arc<Mutex<PathBuf>>,
     pub transfers: Arc<Mutex<Vec<TransferState>>>,
+    pub history: Arc<Mutex<Vec<HistoryRecord>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +49,17 @@ pub struct LocalInfo {
     pub ips: Vec<String>,
     pub save_dir: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryRecord {
+    pub id: String,
+    pub file_name: String,
+    pub peer: String,
+    pub direction: String,
+    pub size: u64,
+    pub status: String,
+    pub timestamp: String,
 }
 
 // ── Commands ──
@@ -174,6 +186,21 @@ async fn cancel_transfer(state: tauri::State<'_, AppState>, id: String) -> Resul
     if let Some(t) = state.transfers.lock().await.iter_mut().find(|t| t.id == id) {
         t.status = "cancelled".into();
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_history(state: tauri::State<'_, AppState>) -> Result<Vec<HistoryRecord>, String> {
+    Ok(state.history.lock().await.clone())
+}
+
+#[tauri::command]
+async fn update_settings(state: tauri::State<'_, AppState>, save_dir: String) -> Result<(), String> {
+    let p = PathBuf::from(&save_dir);
+    if !p.exists() {
+        std::fs::create_dir_all(&p).map_err(|e| format!("mkdir: {e}"))?;
+    }
+    *state.save_dir.lock().await = p;
     Ok(())
 }
 
@@ -449,6 +476,22 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
             "failed".into()
         };
         t.sent = t.total;
+
+        // Save to history
+        let record = HistoryRecord {
+            id: t.id.clone(),
+            file_name: t.file_name.clone(),
+            peer: String::new(),
+            direction: "sent".into(),
+            size: t.total,
+            status: t.status.clone(),
+            timestamp: chrono_now(),
+        };
+        let mut hist = state.history.lock().await;
+        hist.insert(0, record);
+        if hist.len() > 200 {
+            hist.truncate(200);
+        }
     }
     let error = result.err();
     let _ = app.emit(
@@ -480,6 +523,16 @@ fn get_local_ips() -> Vec<String> {
     ips
 }
 
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
 // ── App Entry ──
 
 pub fn run() {
@@ -489,6 +542,7 @@ pub fn run() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         )),
         transfers: Arc::new(Mutex::new(Vec::new())),
+        history: Arc::new(Mutex::new(Vec::new())),
     };
 
     tauri::Builder::default()
@@ -507,6 +561,8 @@ pub fn run() {
             send_files,
             get_transfers,
             cancel_transfer,
+            get_history,
+            update_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

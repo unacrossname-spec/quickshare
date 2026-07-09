@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <link href="styles/app.css" rel="stylesheet"/>
+<script src="js/app.js"></script>
 <script>
 tailwind.config = {
   darkMode: "class",
@@ -58,19 +59,19 @@ tailwind.config = {
     </div>
   </div>
   <nav class="flex-1 space-y-1">
-    <button data-page="discover" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors" onclick="switchPage('discover')">
+    <button data-page="discover" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors">
       <span class="material-symbols-outlined">home</span>
       <span>设备发现</span>
     </button>
-    <button data-page="transfers" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors" onclick="switchPage('transfers')">
+    <button data-page="transfers" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors">
       <span class="material-symbols-outlined">swap_horiz</span>
       <span>传输队列</span>
     </button>
-    <button data-page="history" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors" onclick="switchPage('history')">
+    <button data-page="history" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors">
       <span class="material-symbols-outlined">history</span>
       <span>历史记录</span>
     </button>
-    <button data-page="settings" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors" onclick="switchPage('settings')">
+    <button data-page="settings" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg w-full text-left transition-colors">
       <span class="material-symbols-outlined">settings</span>
       <span>设置</span>
     </button>
@@ -98,7 +99,7 @@ tailwind.config = {
     </div>
     <h2 id="page-title" class="font-bold text-xl">设备发现</h2>
     <div class="flex items-center gap-3 text-on-surface-variant">
-      <button class="p-2 hover:bg-surface-variant rounded-full transition-colors" onclick="scanDevices()" title="刷新">
+      <button class="p-2 hover:bg-surface-variant rounded-full transition-colors" title="刷新" data-action="scan">
         <span class="material-symbols-outlined">refresh</span>
       </button>
       <button class="p-2 hover:bg-surface-variant rounded-full transition-colors" title="通知">
@@ -130,9 +131,10 @@ tailwind.config = {
       <p class="text-sm mt-1">检查网络连接或手动输入地址</p>
       <div class="flex gap-2 mt-4">
         <input id="manual-addr" class="border border-outline-variant rounded-full px-4 py-2 text-sm w-48" placeholder="192.168.1.x:8877"/>
-        <button class="px-4 py-2 bg-primary text-white rounded-full text-sm font-medium hover:opacity-90 transition-opacity" onclick="manualConnect()">连接</button>
+        <button class="px-4 py-2 bg-primary text-white rounded-full text-sm font-medium hover:opacity-90 transition-opacity"data-action="manual-connect">连接</button>
       </div>
     </div>
+    <p id="selected-target" class="hidden text-sm text-primary font-medium text-center mt-4"></p>
   </section>
 
   <!-- Page: Transfers -->
@@ -154,6 +156,7 @@ tailwind.config = {
       <span class="material-symbols-outlined text-4xl text-primary">upload_file</span>
       <p class="font-medium">拖拽文件到此处开始传输</p>
       <p class="text-sm text-outline">或者点击选择文件</p>
+      <input id="file-picker" type="file" class="hidden" onchange="handleFilePick(this)"/>
     </div>
   </section>
 
@@ -162,7 +165,7 @@ tailwind.config = {
     <div class="max-w-4xl mx-auto space-y-6">
       <div class="flex items-center justify-between">
         <h3 class="font-bold text-xl">传输历史记录</h3>
-        <button class="flex items-center gap-2 px-4 py-2 border border-outline-variant rounded-full text-sm hover:bg-surface-container-low transition-colors">
+        <button data-action="clear-history" class="flex items-center gap-2 px-4 py-2 border border-outline-variant rounded-full text-sm hover:bg-surface-container-low transition-colors">
           <span class="material-symbols-outlined text-sm">delete_sweep</span>
           清除所有
         </button>
@@ -200,33 +203,33 @@ tailwind.config = {
         <div class="space-y-6">
           <h4 class="text-xs font-bold text-primary uppercase tracking-widest">通用设置</h4>
           <div class="space-y-3">
-            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant">
-              <div class="flex items-center gap-3">
-                <span class="material-symbols-outlined text-on-surface-variant">notifications_active</span>
-                <div><p class="font-medium text-sm">传输通知</p><p class="text-xs text-outline">完成后弹出提醒</p></div>
+            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant cursor-pointer">
+              <div class="flex items-center gap-3 min-w-0">
+                <span class="material-symbols-outlined text-on-surface-variant shrink-0">notifications_active</span>
+                <div class="min-w-0"><p class="font-medium text-sm truncate">传输通知</p><p class="text-xs text-outline truncate">完成后弹出提醒</p></div>
               </div>
-              <input type="checkbox" class="toggle" checked/>
+              <span class="toggle on"></span>
             </label>
-            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant">
-              <div class="flex items-center gap-3">
-                <span class="material-symbols-outlined text-on-surface-variant">compress</span>
-                <div><p class="font-medium text-sm">启用压缩</p><p class="text-xs text-outline">默认使用 LZ4 压缩传输</p></div>
+            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant cursor-pointer">
+              <div class="flex items-center gap-3 min-w-0">
+                <span class="material-symbols-outlined text-on-surface-variant shrink-0">compress</span>
+                <div class="min-w-0"><p class="font-medium text-sm truncate">启用压缩</p><p class="text-xs text-outline truncate">LZ4 压缩</p></div>
               </div>
-              <input type="checkbox" class="toggle" checked/>
+              <span class="toggle on"></span>
             </label>
-            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant">
-              <div class="flex items-center gap-3">
-                <span class="material-symbols-outlined text-on-surface-variant">folder_zip</span>
-                <div><p class="font-medium text-sm">小文件打包</p><p class="text-xs text-outline">自动打包目录为单文件传输</p></div>
+            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant cursor-pointer">
+              <div class="flex items-center gap-3 min-w-0">
+                <span class="material-symbols-outlined text-on-surface-variant shrink-0">folder_zip</span>
+                <div class="min-w-0"><p class="font-medium text-sm truncate">小文件打包</p><p class="text-xs text-outline truncate">目录自动打包</p></div>
               </div>
-              <input type="checkbox" class="toggle" checked/>
+              <span class="toggle on"></span>
             </label>
           </div>
         </div>
         <div class="space-y-6">
           <h4 class="text-xs font-bold text-primary uppercase tracking-widest">存储</h4>
           <div class="p-6 bg-surface-container-lowest rounded-2xl border border-outline-variant space-y-4">
-            <div>
+            <div class="cursor-pointer" data-action="pick-save-dir">
               <label class="text-sm font-medium">保存目录</label>
               <p id="settings-save-dir" class="text-xs text-outline mt-1 truncate">...</p>
             </div>
@@ -251,19 +254,19 @@ tailwind.config = {
 
 <!-- Mobile Bottom Nav -->
 <nav class="md:hidden fixed bottom-0 left-0 right-0 bg-surface border-t border-outline-variant flex justify-around items-center h-16 z-50">
-  <button class="flex flex-col items-center text-on-surface-variant text-xs" onclick="switchPage('discover')">
+  <button class="bottom-nav-btn flex flex-col items-center text-on-surface-variant text-xs" data-page="discover">
     <span class="material-symbols-outlined">home</span>
     <span>发现</span>
   </button>
-  <button class="flex flex-col items-center text-on-surface-variant text-xs" onclick="switchPage('transfers')">
+  <button class="bottom-nav-btn flex flex-col items-center text-on-surface-variant text-xs" data-page="transfers">
     <span class="material-symbols-outlined">swap_horiz</span>
     <span>传输</span>
   </button>
-  <button class="flex flex-col items-center text-on-surface-variant text-xs" onclick="switchPage('history')">
+  <button class="bottom-nav-btn flex flex-col items-center text-on-surface-variant text-xs" data-page="history">
     <span class="material-symbols-outlined">history</span>
     <span>历史</span>
   </button>
-  <button class="flex flex-col items-center text-on-surface-variant text-xs" onclick="switchPage('settings')">
+  <button class="bottom-nav-btn flex flex-col items-center text-on-surface-variant text-xs" data-page="settings">
     <span class="material-symbols-outlined">settings</span>
     <span>设置</span>
   </button>
@@ -271,6 +274,6 @@ tailwind.config = {
 
 </div>
 
-<script src="js/app.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>
