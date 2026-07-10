@@ -130,9 +130,21 @@ async function scanDevices() {
   const grid = document.getElementById('device-grid');
   const status = document.getElementById('discover-status');
   const noDev = document.getElementById('no-devices');
+  const hint = document.getElementById('discovery-hint');
   grid.classList.add('hidden');
   noDev.classList.add('hidden');
   status.classList.remove('hidden');
+
+  // Check if discovery service is actually listening
+  if (canInvoke()) {
+    const discRunning = await tauriInvoke('get_discovery_status').catch(() => false);
+    if (!discRunning) {
+      status.classList.add('hidden');
+      noDev.classList.remove('hidden');
+      if (hint) hint.textContent = '发现服务未启动（端口 8879 可能被占用）';
+      return;
+    }
+  }
 
   // Stop scanning animation after 5s max (frontend timeout)
   const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
@@ -155,6 +167,7 @@ async function scanDevices() {
   if (knownPeers.length === 0) {
     noDev.classList.remove('hidden');
     grid.classList.add('hidden');
+    if (hint) hint.textContent = '未发现其他设备。请确保对方也在运行 QuickShare，且防火墙允许 UDP 8879 端口';
   } else {
     noDev.classList.add('hidden');
     showPeers();

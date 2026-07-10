@@ -27,6 +27,7 @@ pub struct AppState {
     pub history: Arc<Mutex<Vec<HistoryRecord>>>,
     pub cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub settings: Arc<Mutex<AppSettings>>,
+    pub discovery_running: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +275,11 @@ async fn clear_history(_app: AppHandle, state: tauri::State<'_, AppState>) -> Re
 }
 
 #[tauri::command]
+async fn get_discovery_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.discovery_running.load(Ordering::SeqCst))
+}
+
+#[tauri::command]
 async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.settings.lock().await.clone())
 }
@@ -299,14 +305,28 @@ async fn update_settings(
 }
 
 #[tauri::command]
-async fn scan_devices() -> Result<Vec<DiscoveredDevice>, String> {
+async fn scan_devices(_state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredDevice>, String> {
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
     socket.set_broadcast(true).map_err(|e| format!("broadcast: {e}"))?;
 
     let probe = b"QUICKSHARE_DISCOVER";
-    let _ = socket.send_to(probe, "255.255.255.255:8879").await;
+
+    // Send to limited broadcast AND each subnet-directed broadcast address.
+    // On multi-interface machines, 255.255.255.255 alone may go out the wrong NIC.
+    let targets = get_broadcast_addrs();
+    let mut send_count = 0usize;
+    for addr in &targets {
+        if let Err(e) = socket.send_to(probe, addr).await {
+            eprintln!("[scan] broadcast to {addr}: {e}");
+        } else {
+            send_count += 1;
+        }
+    }
+    if send_count == 0 {
+        return Err("failed to send discovery probe to any interface".into());
+    }
 
     let our_ips = get_local_ips();
     let mut devices = Vec::new();
@@ -340,6 +360,31 @@ async fn scan_devices() -> Result<Vec<DiscoveredDevice>, String> {
     }
 
     Ok(devices)
+}
+
+/// Collect broadcast addresses: 255.255.255.255 + each subnet's directed broadcast.
+fn get_broadcast_addrs() -> Vec<String> {
+    let mut addrs = vec!["255.255.255.255:8879".to_string()];
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            // Each line: "... inet 192.168.1.100/24 brd 192.168.1.255 scope ..."
+            for line in stdout.lines() {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if let Some(brd_pos) = fields.iter().position(|&w| w == "brd") {
+                    if let Some(brd) = fields.get(brd_pos + 1) {
+                        let addr = format!("{brd}:8879");
+                        if !addrs.contains(&addr) {
+                            addrs.push(addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    addrs
 }
 
 // ── Background Server ──
@@ -387,10 +432,19 @@ pub async fn run_discovery(app: AppHandle) {
     let socket = match tokio::net::UdpSocket::bind("0.0.0.0:8879").await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[discovery] bind: {e}");
+            eprintln!("[discovery] bind 0.0.0.0:8879 failed: {e}");
             return;
         }
     };
+
+    // Enable broadcast on the discovery socket (belt-and-suspenders; receiving
+    // broadcasts doesn't require SO_BROADCAST, but some platforms are picky).
+    if let Err(e) = socket.set_broadcast(true) {
+        eprintln!("[discovery] set_broadcast: {e}");
+    }
+
+    app.state::<AppState>().discovery_running.store(true, Ordering::SeqCst);
+    eprintln!("[discovery] listening on UDP 0.0.0.0:8879");
 
     let mut buf = [0u8; 256];
     loop {
@@ -413,14 +467,20 @@ pub async fn run_discovery(app: AppHandle) {
                         "ip": pick_lan_ip(&ips).unwrap_or(""),
                         "port": port,
                     });
-                    let _ = socket
+                    if let Err(e) = socket
                         .send_to(response.to_string().as_bytes(), &src)
-                        .await;
+                        .await
+                    {
+                        eprintln!("[discovery] respond to {src}: {e}");
+                    }
                 }
             }
+            Ok(Err(e)) => eprintln!("[discovery] recv: {e}"),
             _ => {}
         }
     }
+
+    app.state::<AppState>().discovery_running.store(false, Ordering::SeqCst);
 }
 
 async fn handle_incoming(
@@ -807,6 +867,7 @@ pub fn run() {
         history: Arc::new(Mutex::new(saved_history)),
         cancel_flags: Arc::new(Mutex::new(HashMap::new())),
         settings: Arc::new(Mutex::new(saved_settings)),
+        discovery_running: Arc::new(AtomicBool::new(false)),
     };
 
     tauri::Builder::default()
@@ -851,6 +912,7 @@ pub fn run() {
             cancel_transfer,
             get_history,
             clear_history,
+            get_discovery_status,
             get_settings,
             update_settings,
             scan_devices,

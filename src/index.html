@@ -128,7 +128,7 @@ tailwind.config = {
     <div id="no-devices" class="flex flex-col items-center justify-center py-16 text-outline">
       <span class="material-symbols-outlined text-5xl mb-4">wifi_off</span>
       <p class="font-medium">未发现设备</p>
-      <p class="text-sm mt-1">检查网络连接或手动输入地址</p>
+      <p class="text-sm mt-1" id="discovery-hint">检查网络连接或手动输入地址</p>
       <div class="flex gap-2 mt-4">
         <input id="manual-addr" class="border border-outline-variant rounded-full px-4 py-2 text-sm w-48" placeholder="192.168.1.x:8877"/>
         <button class="px-4 py-2 bg-primary text-white rounded-full text-sm font-medium hover:opacity-90 transition-opacity"data-action="manual-connect">连接</button>
