@@ -305,22 +305,20 @@ async fn update_settings(
 }
 
 #[tauri::command]
-async fn scan_devices(_state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredDevice>, String> {
+// ── Device Scanning (shared by IPC command and periodic background scan) ──
+
+/// Core scan logic. Sends UDP broadcast probes and collects responses.
+async fn do_scan() -> Result<Vec<DiscoveredDevice>, String> {
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
     socket.set_broadcast(true).map_err(|e| format!("broadcast: {e}"))?;
 
     let probe = b"QUICKSHARE_DISCOVER";
-
-    // Send to limited broadcast AND each subnet-directed broadcast address.
-    // On multi-interface machines, 255.255.255.255 alone may go out the wrong NIC.
     let targets = get_broadcast_addrs();
     let mut send_count = 0usize;
     for addr in &targets {
-        if let Err(e) = socket.send_to(probe, addr).await {
-            eprintln!("[scan] broadcast to {addr}: {e}");
-        } else {
+        if socket.send_to(probe, addr).await.is_ok() {
             send_count += 1;
         }
     }
@@ -360,6 +358,37 @@ async fn scan_devices(_state: tauri::State<'_, AppState>) -> Result<Vec<Discover
     }
 
     Ok(devices)
+}
+
+/// Tauri IPC command for on-demand scanning.
+#[tauri::command]
+async fn scan_devices(_state: tauri::State<'_, AppState>) -> Result<Vec<DiscoveredDevice>, String> {
+    do_scan().await
+}
+
+/// Periodic background scanner — runs independently of frontend IPC.
+/// Pushes results into the webview via `window.eval()` so discovery works
+/// even when `__TAURI__` is not available.
+async fn run_periodic_scan(app: AppHandle) {
+    // Wait for webview to be ready, then scan every 6 seconds.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    eprintln!("[periodic-scan] started");
+    loop {
+        if app.state::<AppState>().server_shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match do_scan().await {
+            Ok(devices) => {
+                eprintln!("[periodic-scan] found {} devices", devices.len());
+                if let Some(window) = app.get_webview_window("main") {
+                    let json = serde_json::to_string(&devices).unwrap_or_default();
+                    let _ = window.eval(&format!("window.__DISCOVERED_DEVICES = {};", json));
+                }
+            }
+            Err(e) => eprintln!("[periodic-scan] {e}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    }
 }
 
 /// Collect broadcast addresses: 255.255.255.255 + each subnet's directed broadcast.
@@ -930,6 +959,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let disc_handle = handle.clone();
+            let scan_handle = handle.clone();
 
             // Inject bootstrap data into webview (bypasses __TAURI__ IPC dependency)
             let boot_handle = handle.clone();
@@ -955,6 +985,9 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(async move {
                 run_discovery(disc_handle).await;
+            });
+            tauri::async_runtime::spawn(async move {
+                run_periodic_scan(scan_handle).await;
             });
             Ok(())
         })

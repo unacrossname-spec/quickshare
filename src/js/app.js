@@ -135,33 +135,24 @@ async function scanDevices() {
   noDev.classList.add('hidden');
   status.classList.remove('hidden');
 
-  // Check if discovery service is actually listening
-  if (canInvoke()) {
-    const discRunning = await tauriInvoke('get_discovery_status').catch(() => false);
-    if (!discRunning) {
-      status.classList.add('hidden');
-      noDev.classList.remove('hidden');
-      if (hint) hint.textContent = '发现服务未启动（端口 8879 可能被占用）';
-      return;
-    }
-  }
-
-  // Stop scanning animation after 5s max (frontend timeout)
-  const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
-
+  // Try IPC first; fall back to periodic-scan results injected via window.eval()
   let devices = [];
   if (canInvoke()) {
     const scan = tauriInvoke('scan_devices').then(d => d, () => []);
+    const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
     const result = await Promise.race([scan, timeout]);
     devices = result === 'timeout' ? [] : result;
-    knownPeers = devices.map(d => ({
-      name: d.name,
-      ip: `${d.ip}:${d.port}`,
-      icon: 'desktop_windows',
-    }));
   } else {
-    await timeout;
+    // No IPC — wait 3s for the periodic background scanner to push results
+    await new Promise(r => setTimeout(r, 3000));
+    devices = window.__DISCOVERED_DEVICES || [];
   }
+
+  knownPeers = devices.map(d => ({
+    name: d.name,
+    ip: `${d.ip}:${d.port}`,
+    icon: 'desktop_windows',
+  }));
 
   status.classList.add('hidden');
   if (knownPeers.length === 0) {
