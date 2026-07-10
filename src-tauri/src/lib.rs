@@ -822,6 +822,7 @@ fn is_plausible_lan_ip(s: &str) -> bool {
         || s.starts_with("169.254.")   // link-local / APIPA
         || s.starts_with("198.18.")    // RFC 2544 benchmarking (WSL2, Docker Desktop)
         || s.starts_with("198.19.")    // RFC 2544 benchmarking
+        || s.starts_with("255.")       // subnet mask
         || s.starts_with("0.")
     {
         return false;
@@ -853,13 +854,17 @@ fn get_local_ips() -> Vec<String> {
         }
     }
 
-    // 2. Windows: ipconfig (parses "IPv4 Address . . . : 192.168.0.104"
-    //    as well as non-English localised variants, since we pattern-match on
-    //    any line containing ": X.X.X.X" where X.X.X.X looks like an IPv4 addr).
+    // 2. Windows: ipconfig.
+    //    Locale-independent: both "IPv4 Address" (en) and "IPv4 地址" (zh)
+    //    contain the keyword "IPv4". Only parse those lines to avoid
+    //    accidentally picking up gateway / subnet-mask / DNS-suffix lines.
     if ips.is_empty() {
         if let Ok(output) = std::process::Command::new("ipconfig").output() {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 for line in stdout.lines() {
+                    if !line.contains("IPv4") {
+                        continue;
+                    }
                     if let Some(pos) = line.rfind(": ") {
                         let candidate = line[pos + 2..].trim();
                         if looks_like_ipv4(candidate)
