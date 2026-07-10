@@ -369,16 +369,15 @@ fn get_broadcast_addrs() -> Vec<String> {
         .args(["-4", "-o", "addr", "show"])
         .output()
     {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            // Each line: "... inet 192.168.1.100/24 brd 192.168.1.255 scope ..."
-            for line in stdout.lines() {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if let Some(brd_pos) = fields.iter().position(|&w| w == "brd") {
-                    if let Some(brd) = fields.get(brd_pos + 1) {
-                        let addr = format!("{brd}:8879");
-                        if !addrs.contains(&addr) {
-                            addrs.push(addr);
-                        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Each line: "... inet 192.168.1.100/24 brd 192.168.1.255 scope ..."
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if let Some(brd_pos) = fields.iter().position(|&w| w == "brd") {
+                if let Some(brd) = fields.get(brd_pos + 1) {
+                    let addr = format!("{brd}:8879");
+                    if !addrs.contains(&addr) {
+                        addrs.push(addr);
                     }
                 }
             }
@@ -801,8 +800,7 @@ fn get_hostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok().map(|s| s.trim().to_string()))
         .or_else(|| std::env::var("COMPUTERNAME").ok())
@@ -838,17 +836,16 @@ fn get_local_ips() -> Vec<String> {
         .args(["-4", "-o", "addr", "show"])
         .output()
     {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            for line in stdout.lines() {
-                if let Some(ip) = line
-                    .split_whitespace()
-                    .nth(3)
-                    .and_then(|s| s.split('/').next())
-                {
-                    let ip = ip.trim();
-                    if is_plausible_lan_ip(ip) && !ips.contains(&ip.to_string()) {
-                        ips.push(ip.to_string());
-                    }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(ip) = line
+                .split_whitespace()
+                .nth(3)
+                .and_then(|s| s.split('/').next())
+            {
+                let ip = ip.trim();
+                if is_plausible_lan_ip(ip) && !ips.contains(&ip.to_string()) {
+                    ips.push(ip.to_string());
                 }
             }
         }
@@ -858,21 +855,24 @@ fn get_local_ips() -> Vec<String> {
     //    Locale-independent: both "IPv4 Address" (en) and "IPv4 地址" (zh)
     //    contain the keyword "IPv4". Only parse those lines to avoid
     //    accidentally picking up gateway / subnet-mask / DNS-suffix lines.
+    //
+    //    Uses String::from_utf8_lossy because on non-English Windows the
+    //    console output is encoded in the system ANSI code page (e.g. GBK on
+    //    Chinese Windows), NOT UTF-8.
     if ips.is_empty() {
         if let Ok(output) = std::process::Command::new("ipconfig").output() {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                for line in stdout.lines() {
-                    if !line.contains("IPv4") {
-                        continue;
-                    }
-                    if let Some(pos) = line.rfind(": ") {
-                        let candidate = line[pos + 2..].trim();
-                        if looks_like_ipv4(candidate)
-                            && is_plausible_lan_ip(candidate)
-                            && !ips.contains(&candidate.to_string())
-                        {
-                            ips.push(candidate.to_string());
-                        }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if !line.contains("IPv4") {
+                    continue;
+                }
+                if let Some(pos) = line.rfind(": ") {
+                    let candidate = line[pos + 2..].trim();
+                    if looks_like_ipv4(candidate)
+                        && is_plausible_lan_ip(candidate)
+                        && !ips.contains(&candidate.to_string())
+                    {
+                        ips.push(candidate.to_string());
                     }
                 }
             }
