@@ -519,8 +519,15 @@ function pickLanIp(ips) {
     return octet >= 16 && octet <= 31;
   });
   if (p172) return p172;
-  // Fallback: filter out loopback and Docker default bridge (172.17.x.x)
-  return ips.find(ip => !ip.startsWith('127.') && !ip.startsWith('172.17.')) || ips[0];
+  // Filter out loopback, link-local (169.254), and RFC 2544 benchmarking
+  // range (198.18-19.x — used by WSL2/Docker Desktop virtual adapters)
+  return ips.find(ip =>
+    !ip.startsWith('127.')
+    && !ip.startsWith('169.254.')
+    && !ip.startsWith('198.18.')
+    && !ip.startsWith('198.19.')
+    && !ip.startsWith('172.17.')
+  ) || ips[0];
 }
 function fmtSize(bytes) {
   if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';

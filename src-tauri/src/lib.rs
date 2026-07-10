@@ -809,9 +809,30 @@ fn get_hostname() -> String {
         .unwrap_or_else(|| "QuickShare".into())
 }
 
+fn looks_like_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 { return false; }
+    parts.iter().all(|p| p.parse::<u8>().is_ok())
+}
+
+/// Returns true if this IPv4 address could plausibly be a LAN interface
+/// (not loopback, link-local, Docker/WSL virtual, or benchmarking range).
+fn is_plausible_lan_ip(s: &str) -> bool {
+    if s.starts_with("127.")
+        || s.starts_with("169.254.")   // link-local / APIPA
+        || s.starts_with("198.18.")    // RFC 2544 benchmarking (WSL2, Docker Desktop)
+        || s.starts_with("198.19.")    // RFC 2544 benchmarking
+        || s.starts_with("0.")
+    {
+        return false;
+    }
+    true
+}
+
 fn get_local_ips() -> Vec<String> {
     let mut ips = Vec::new();
-    // Enumerate all non-loopback IPv4 interfaces
+
+    // 1. Linux: ip -4 -o addr show
     if let Ok(output) = std::process::Command::new("ip")
         .args(["-4", "-o", "addr", "show"])
         .output()
@@ -823,26 +844,53 @@ fn get_local_ips() -> Vec<String> {
                     .nth(3)
                     .and_then(|s| s.split('/').next())
                 {
-                    if !ip.starts_with("127.") && !ips.contains(&ip.to_string()) {
+                    let ip = ip.trim();
+                    if is_plausible_lan_ip(ip) && !ips.contains(&ip.to_string()) {
                         ips.push(ip.to_string());
                     }
                 }
             }
         }
     }
-    // Fallback: try UDP connect method
+
+    // 2. Windows: ipconfig (parses "IPv4 Address . . . : 192.168.0.104"
+    //    as well as non-English localised variants, since we pattern-match on
+    //    any line containing ": X.X.X.X" where X.X.X.X looks like an IPv4 addr).
+    if ips.is_empty() {
+        if let Ok(output) = std::process::Command::new("ipconfig").output() {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                for line in stdout.lines() {
+                    if let Some(pos) = line.rfind(": ") {
+                        let candidate = line[pos + 2..].trim();
+                        if looks_like_ipv4(candidate)
+                            && is_plausible_lan_ip(candidate)
+                            && !ips.contains(&candidate.to_string())
+                        {
+                            ips.push(candidate.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: UDP connect to a well-known address and read local addr.
+    //    Last resort — this picks the "default route" interface which is often
+    //    a virtual adapter (WSL, Docker) on Windows. We use it only when both
+    //    `ip` and `ipconfig` failed.
     if ips.is_empty() {
         if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
             if socket.connect("8.8.8.8:53").is_ok() {
                 if let Ok(local) = socket.local_addr() {
                     let ip = local.ip().to_string();
-                    if !ip.starts_with("127.") {
+                    if is_plausible_lan_ip(&ip) && !ips.contains(&ip) {
                         ips.push(ip);
                     }
                 }
             }
         }
     }
+
     ips
 }
 
