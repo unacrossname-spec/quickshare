@@ -1,0 +1,9 @@
+Package: quick-share
+Version: 0.2.0
+Architecture: amd64
+Installed-Size: 15451
+Maintainer: quickshare
+Priority: optional
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Description: (none)
+ (none)
