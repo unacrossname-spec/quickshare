@@ -1,16 +1,21 @@
 // QuickShare - Tauri v2 Frontend
-// Lazily resolve __TAURI__ — may not be injected at script parse time
+// Tauri v2 always injects __TAURI_INTERNALS__ (the internal IPC bridge).
+// __TAURI__ is the public API only available when @tauri-apps/api npm
+// package is installed. We target __TAURI_INTERNALS__ directly to avoid
+// the npm dependency.
 function tauriInvoke(cmd, args) {
-  const fn = window.__TAURI__?.core?.invoke;
+  const fn = window.__TAURI_INTERNALS__?.invoke;
   if (!fn) return Promise.reject(new Error('Tauri not ready'));
   return fn(cmd, args);
 }
 function tauriListen(evt, cb) {
-  const fn = window.__TAURI__?.event?.listen;
-  if (!fn) return;
-  return fn(evt, cb);
+  const internals = window.__TAURI_INTERNALS__;
+  if (!internals) return;
+  // Tauri events: invoke 'plugin:event|listen' with a transformed callback
+  const handler = internals.transformCallback(cb, false);
+  return internals.invoke('plugin:event|listen', { event: evt, handler });
 }
-function canInvoke() { return !!window.__TAURI__?.core?.invoke; }
+function canInvoke() { return !!window.__TAURI_INTERNALS__?.invoke; }
 
 let currentPage = 'discover';
 let transfers = [];
@@ -94,7 +99,7 @@ async function waitForInit(maxMs) {
   const step = 50;
   for (let i = 0; i < maxMs / step; i++) {
     if (window.__BOOTSTRAP_DATA) return { source: 'bootstrap', data: window.__BOOTSTRAP_DATA };
-    if (window.__TAURI__?.core?.invoke) return { source: 'tauri' };
+    if (window.__TAURI_INTERNALS__?.invoke) return { source: 'tauri' };
     await new Promise(r => setTimeout(r, step));
   }
   return { source: null };
@@ -135,18 +140,11 @@ async function scanDevices() {
   noDev.classList.add('hidden');
   status.classList.remove('hidden');
 
-  // Try IPC first; fall back to periodic-scan results injected via window.eval()
-  let devices = [];
-  if (canInvoke()) {
-    const scan = tauriInvoke('scan_devices').then(d => d, () => []);
-    const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
-    const result = await Promise.race([scan, timeout]);
-    devices = result === 'timeout' ? [] : result;
-  } else {
-    // No IPC — wait 3s for the periodic background scanner to push results
-    await new Promise(r => setTimeout(r, 3000));
-    devices = window.__DISCOVERED_DEVICES || [];
-  }
+  // IPC is always available via __TAURI_INTERNALS__ (no npm package needed)
+  const scan = tauriInvoke('scan_devices').then(d => d, () => []);
+  const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
+  const result = await Promise.race([scan, timeout]);
+  const devices = result === 'timeout' ? [] : result;
 
   knownPeers = devices.map(d => ({
     name: d.name,
