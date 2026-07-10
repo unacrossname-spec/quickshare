@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegram/tauri/dev/crates/tauri-cli/schema.json",
   "productName": "QuickShare",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "identifier": "com.quickshare.app",
   "build": {
     "frontendDist": "../src"
