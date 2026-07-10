@@ -9,9 +9,9 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            bundle: nsis
+            exe_name: quickshare-x86_64-pc-windows-msvc.exe
           - os: ubuntu-latest
-            bundle: deb
+            exe_name: quickshare-x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -39,13 +39,20 @@ jobs:
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
       - name: Build
-        run: cargo tauri build --bundles ${{ matrix.bundle }}
+        run: cargo tauri build
 
-      - name: Upload installer
+      - name: Rename binary
+        shell: bash
+        run: |
+          cp target/release/quickshare${{ matrix.os == 'windows-latest' && '.exe' || '' }} \
+             ../../${{ matrix.exe_name }}
+
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: quickshare-${{ matrix.os }}-${{ github.ref_name }}
-          path: src-tauri/target/release/bundle/
+          name: ${{ matrix.exe_name }}
+          path: ${{ matrix.exe_name }}
+          if-no-files-found: error
 
   release:
     needs: build
