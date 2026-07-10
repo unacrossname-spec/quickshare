@@ -9,25 +9,18 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            exe_name: quickshare-x86_64-pc-windows-msvc.exe
+            ext: .exe
           - os: ubuntu-latest
-            exe_name: quickshare-x86_64-unknown-linux-gnu
+            ext: ''
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-
-    defaults:
-      run:
-        working-directory: src-tauri
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
 
       - name: Install Linux deps
         if: matrix.os == 'ubuntu-latest'
@@ -39,20 +32,14 @@ jobs:
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
       - name: Build
-        run: cargo tauri build
-
-      - name: Rename binary
-        shell: bash
-        run: |
-          cp target/release/quickshare${{ matrix.os == 'windows-latest' && '.exe' || '' }} \
-             ../../${{ matrix.exe_name }}
+        run: cargo build --release
+        working-directory: src-tauri
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.exe_name }}
-          path: ${{ matrix.exe_name }}
-          if-no-files-found: error
+          name: quickshare-${{ matrix.os }}${{ matrix.ext }}
+          path: src-tauri/target/release/quickshare${{ matrix.ext }}
 
   release:
     needs: build
@@ -60,7 +47,19 @@ jobs:
     permissions: { contents: write }
     steps:
       - uses: actions/download-artifact@v4
-      - uses: softprops/action-gh-release@v2
+        with:
+          merge-multiple: true
+
+      - name: Rename files for release
+        run: |
+          mv quickshare.exe quickshare-windows-latest.exe 2>/dev/null || true
+          mv quickshare quickshare-ubuntu-latest 2>/dev/null || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
-          files: quickshare-*/
+          generate_release_notes: true
+          files: |
+            quickshare-windows-latest.exe
+            quickshare-ubuntu-latest
