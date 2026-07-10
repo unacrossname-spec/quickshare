@@ -215,22 +215,41 @@ function setupDropZone() {
   const zone = document.getElementById('drop-zone');
   if (!zone) return;
 
-  zone.addEventListener('click', () => {
-    document.getElementById('file-picker')?.click();
+  // Click → open native file dialog via Tauri IPC (pick_file command).
+  zone.addEventListener('click', async () => {
+    if (!canInvoke()) {
+      // Fallback: try HTML file input
+      document.getElementById('file-picker')?.click();
+      return;
+    }
+    try {
+      const picked = await tauriInvoke('pick_file');
+      if (picked && picked.path) {
+        handleFilePath(picked.path, picked.size, picked.name);
+      }
+    } catch (e) {
+      console.error('pick_file failed:', e);
+      // Fallback to HTML file input on error
+      document.getElementById('file-picker')?.click();
+    }
   });
+
   zone.addEventListener('dragenter', e => { e.preventDefault(); zone.classList.add('drag-over'); });
   zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
   zone.addEventListener('dragleave', e => {
     e.preventDefault();
     if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
   });
+  // NOTE: File drop is handled by Tauri's native DragDrop event (see setupTauriEvents).
+  // The HTML5 drop handler below is a fallback for when Tauri events are not available.
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('drag-over');
+    // If Tauri file-dropped event hasn't fired (e.g. mock mode), try HTML5 API
     const files = e.dataTransfer?.files;
     if (files?.length) {
-      const path = files[0].path || files[0].name;
-      handleFilePath(path, files[0].size || 0, files[0].name);
+      const file = files[0];
+      handleFilePath(file.path || file.name, file.size || 0, file.name);
     }
   });
 }
@@ -298,7 +317,8 @@ function setupGlobalListeners() {
     if (e.target.closest('[data-action="clear-history"]')) { clearHistory(); return; }
     if (e.target.closest('[data-action="pick-save-dir"]')) { pickSaveDir(); return; }
     if (e.target.closest('[data-action="file-picker-trigger"]')) {
-      document.getElementById('file-picker')?.click(); return;
+      // Click is handled by setupDropZone's own listener; no-op here.
+      return;
     }
     const cancelBtn = e.target.closest('[data-action="cancel-transfer"]');
     if (cancelBtn) { cancelTransfer(cancelBtn.dataset.id); return; }
@@ -469,29 +489,32 @@ function setupTauriEvents() {
     try { history = await tauriInvoke('get_history') || []; } catch {}
     if (currentPage === 'history') renderHistory();
   });
+  // Native file drag-and-drop (handled by Rust → emitted as 'file-dropped')
+  l('file-dropped', e => {
+    const files = Array.isArray(e.payload) ? e.payload : [e.payload];
+    for (const f of files) {
+      if (f && f.path) {
+        handleFilePath(f.path, f.size || 0, f.name || 'unknown');
+      }
+    }
+    // Switch to transfers page to show progress
+    if (files.length > 0 && currentPage !== 'transfers') switchPage('transfers');
+  });
 }
 
 // ── Settings ──
 async function pickSaveDir() {
-  if (!canInvoke()) return alert('开发模式下不可用');
+  if (!canInvoke()) return alert('保存目录选择在离线模式下不可用');
   try {
-    const { open } = await importFailsafe('@tauri-apps/plugin-dialog', 'open');
-    if (open) {
-      const dir = await open({ directory: true });
-      if (dir) {
-        await tauriInvoke('update_settings', { saveDir: dir });
-        document.getElementById('settings-save-dir').textContent = dir;
-      }
+    const dir = await tauriInvoke('pick_folder');
+    if (dir) {
+      await tauriInvoke('update_settings', { saveDir: dir });
+      document.getElementById('settings-save-dir').textContent = dir;
     }
-  } catch (e) { console.warn('settings dialog:', e); }
+  } catch (e) { console.warn('pick folder:', e); }
 }
 
 // ── Utility ──
-async function importFailsafe(pkg, fn) {
-  try { const mod = await import(pkg); return { [fn]: mod[fn] }; }
-  catch { return { [fn]: null }; }
-}
-
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function pickLanIp(ips) {
   if (!ips?.length) return '';

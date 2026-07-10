@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, WebviewEvent};
+use tauri_plugin_dialog::DialogExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -86,6 +87,13 @@ pub struct DiscoveredDevice {
     pub name: String,
     pub ip: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PickedFile {
+    pub path: String,
+    pub name: String,
+    pub size: u64,
 }
 
 // ── Persistence ──
@@ -277,6 +285,50 @@ async fn clear_history(_app: AppHandle, state: tauri::State<'_, AppState>) -> Re
 #[tauri::command]
 async fn get_discovery_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(state.discovery_running.load(Ordering::SeqCst))
+}
+
+#[tauri::command]
+async fn pick_file(app: AppHandle) -> Result<Option<PickedFile>, String> {
+    let result = app
+        .dialog()
+        .file()
+        .set_title("选择文件")
+        .blocking_pick_file();
+
+    match result {
+        Some(fp) => {
+            let path_buf = fp.into_path().map_err(|e| format!("invalid path: {e}"))?;
+            let name = path_buf
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let size = std::fs::metadata(&path_buf).map(|m| m.len()).unwrap_or(0);
+            Ok(Some(PickedFile {
+                path: path_buf.to_string_lossy().to_string(),
+                name,
+                size,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let result = app
+        .dialog()
+        .file()
+        .set_title("选择文件夹")
+        .blocking_pick_folder();
+
+    match result {
+        Some(fp) => {
+            let path_buf = fp.into_path().map_err(|e| format!("invalid path: {e}"))?;
+            Ok(Some(path_buf.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
 }
 
 #[tauri::command]
@@ -961,6 +1013,38 @@ pub fn run() {
             let disc_handle = handle.clone();
             let scan_handle = handle.clone();
 
+            // Set up native file drag-and-drop handler.
+            // Tauri's webview emits DragDrop events; we forward them to the
+            // frontend as custom 'file-dropped' events so the JS layer doesn't
+            // need the @tauri-apps/api npm package.
+            if let Some(window) = app.get_webview_window("main") {
+                let drop_handle = handle.clone();
+                window.on_webview_event(move |event| {
+                    if let WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                        let file_list: Vec<serde_json::Value> = paths
+                            .iter()
+                            .map(|p| {
+                                let path_str = p.to_string_lossy().to_string();
+                                let name = std::path::Path::new(&path_str)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                let size = std::fs::metadata(&path_str)
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                serde_json::json!({
+                                    "path": path_str,
+                                    "name": name,
+                                    "size": size,
+                                })
+                            })
+                            .collect();
+                        let _ = drop_handle.emit("file-dropped", file_list);
+                    }
+                });
+            }
+
             // Inject bootstrap data into webview (bypasses __TAURI__ IPC dependency)
             let boot_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -1002,6 +1086,8 @@ pub fn run() {
             get_settings,
             update_settings,
             scan_devices,
+            pick_file,
+            pick_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
