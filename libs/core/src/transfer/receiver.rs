@@ -56,6 +56,7 @@ impl FileReceiver {
 
     /// Read the next chunk (binary header + data).
     /// Returns `None` on done marker.
+    /// Verifies the BLAKE3 hash of received data against the header.
     pub async fn recv_chunk(&mut self) -> Result<Option<(ChunkInfo, Vec<u8>)>> {
         let mut hdr = [0u8; HDR_SIZE];
         match self.stream.read_exact(&mut hdr).await {
@@ -75,6 +76,12 @@ impl FileReceiver {
         let mut data = vec![0u8; size as usize];
         self.stream.read_exact(&mut data).await?;
         self.bytes_received += size as u64;
+
+        // Verify chunk integrity
+        let computed = *blake3::hash(&data).as_bytes();
+        if computed != hash {
+            anyhow::bail!("chunk {index} hash mismatch");
+        }
 
         let info = ChunkInfo { index, offset, size: size as usize, hash };
         Ok(Some((info, data)))

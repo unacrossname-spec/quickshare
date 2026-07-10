@@ -8,10 +8,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: windows-latest
-            ext: .exe
           - os: ubuntu-latest
             ext: ''
+          - os: windows-latest
+            ext: .exe
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -32,13 +32,12 @@ jobs:
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
       - name: Build
-        run: cargo build --release
-        working-directory: src-tauri
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: quickshare-${{ matrix.os }}${{ matrix.ext }}
+          name: quickshare-${{ matrix.os }}
           path: src-tauri/target/release/quickshare${{ matrix.ext }}
 
   release:
@@ -50,10 +49,10 @@ jobs:
         with:
           merge-multiple: true
 
-      - name: Rename files for release
+      - name: Rename for release
         run: |
-          mv quickshare.exe quickshare-windows-latest.exe 2>/dev/null || true
-          mv quickshare quickshare-ubuntu-latest 2>/dev/null || true
+          mv quickshare.exe quickshare-windows-x64.exe 2>/dev/null || true
+          mv quickshare quickshare-linux-x64 2>/dev/null || true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -61,5 +60,5 @@ jobs:
           draft: false
           generate_release_notes: true
           files: |
-            quickshare-windows-latest.exe
-            quickshare-ubuntu-latest
+            quickshare-windows-x64.exe
+            quickshare-linux-x64

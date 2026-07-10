@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,8 @@ pub struct AppState {
     pub save_dir: Arc<Mutex<PathBuf>>,
     pub transfers: Arc<Mutex<Vec<TransferState>>>,
     pub history: Arc<Mutex<Vec<HistoryRecord>>>,
+    pub cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub settings: Arc<Mutex<AppSettings>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +54,7 @@ pub struct LocalInfo {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryRecord {
     pub id: String,
     pub file_name: String,
@@ -62,16 +65,74 @@ pub struct HistoryRecord {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub compress: bool,
+    pub bundle: bool,
+    pub notifications_enabled: bool,
+    pub port: u16,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { compress: true, bundle: true, notifications_enabled: true, port: 8877 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredDevice {
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+}
+
+// ── Persistence ──
+
+fn state_path() -> PathBuf {
+    let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    p.push("quickshare_state.json");
+    p
+}
+
+fn load_state_file() -> (Vec<HistoryRecord>, AppSettings) {
+    let path = state_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        #[derive(Deserialize)]
+        struct Persisted {
+            history: Vec<HistoryRecord>,
+            settings: AppSettings,
+        }
+        if let Ok(s) = serde_json::from_str::<Persisted>(&data) {
+            return (s.history, s.settings);
+        }
+    }
+    (Vec::new(), AppSettings::default())
+}
+
+fn save_state_file(history: &[HistoryRecord], settings: &AppSettings) {
+    #[derive(Serialize)]
+    struct Persisted<'a> {
+        history: &'a [HistoryRecord],
+        settings: &'a AppSettings,
+    }
+    let path = state_path();
+    if let Ok(data) = serde_json::to_string(&Persisted { history, settings }) {
+        let _ = std::fs::write(&path, &data);
+    }
+}
+
 // ── Commands ──
 
 #[tauri::command]
 async fn get_local_info(state: tauri::State<'_, AppState>) -> Result<LocalInfo, String> {
     let save_dir = state.save_dir.lock().await.clone();
+    let port = state.settings.lock().await.port;
     Ok(LocalInfo {
         name: get_hostname(),
         ips: get_local_ips(),
         save_dir: save_dir.to_string_lossy().to_string(),
-        port: 8877,
+        port,
     })
 }
 
@@ -80,7 +141,7 @@ async fn send_files(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     opts: SendOptions,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path = PathBuf::from(&opts.path);
     if path.is_dir() {
         send_directory(app, state, opts).await
@@ -93,7 +154,7 @@ async fn send_single(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     opts: SendOptions,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let addr: SocketAddr = opts.addr.parse().map_err(|e| format!("invalid addr: {e}"))?;
     let file_path = PathBuf::from(&opts.path);
     let data = std::fs::read(&file_path).map_err(|e| format!("read: {e}"))?;
@@ -124,21 +185,24 @@ async fn send_single(
 
     let tid = uuid::Uuid::new_v4().to_string();
     register_transfer(&state, &tid, &file_name, file_size as u64).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
 
+    let tid2 = tid.clone();
     tauri::async_runtime::spawn(async move {
-        let r = do_send_file(addr, meta, &send_data, &app, &tid).await;
-        finish_transfer(&app, &tid, r).await;
+        let r = do_send_file(addr, meta, &send_data, &app, &tid2, cancel).await;
+        finish_transfer(&app, &tid2, r).await;
     });
 
-    Ok(())
+    Ok(tid)
 }
 
 async fn send_directory(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     opts: SendOptions,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let addr: SocketAddr = opts.addr.parse().map_err(|e| format!("invalid addr: {e}"))?;
     let dir_path = PathBuf::from(&opts.path);
     let bundle = opts.bundle;
@@ -159,21 +223,25 @@ async fn send_directory(
 
     let tid = uuid::Uuid::new_v4().to_string();
     register_transfer(&state, &tid, &format!("{} ({} files)", root_name, file_count), total_size).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
 
     if bundle {
+        let tid2 = tid.clone();
         tauri::async_runtime::spawn(async move {
-            let r = do_send_bundle(addr, dir_path, files, &root_name, &app, &tid).await;
-            finish_transfer(&app, &tid, r).await;
+            let r = do_send_bundle(addr, dir_path, files, &root_name, &app, &tid2, cancel).await;
+            finish_transfer(&app, &tid2, r).await;
         });
     } else {
+        let tid2 = tid.clone();
         tauri::async_runtime::spawn(async move {
-            let r = do_send_batch(addr, dir_path, files, compress, &app, &tid).await;
-            finish_transfer(&app, &tid, r).await;
+            let r = do_send_batch(addr, dir_path, files, compress, &app, &tid2, cancel).await;
+            finish_transfer(&app, &tid2, r).await;
         });
     }
 
-    Ok(())
+    Ok(tid)
 }
 
 #[tauri::command]
@@ -183,6 +251,9 @@ async fn get_transfers(state: tauri::State<'_, AppState>) -> Result<Vec<Transfer
 
 #[tauri::command]
 async fn cancel_transfer(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    if let Some(flag) = state.cancel_flags.lock().await.get(&id) {
+        flag.store(true, Ordering::SeqCst);
+    }
     if let Some(t) = state.transfers.lock().await.iter_mut().find(|t| t.id == id) {
         t.status = "cancelled".into();
     }
@@ -195,23 +266,91 @@ async fn get_history(state: tauri::State<'_, AppState>) -> Result<Vec<HistoryRec
 }
 
 #[tauri::command]
-async fn update_settings(state: tauri::State<'_, AppState>, save_dir: String) -> Result<(), String> {
-    let p = PathBuf::from(&save_dir);
-    if !p.exists() {
-        std::fs::create_dir_all(&p).map_err(|e| format!("mkdir: {e}"))?;
-    }
-    *state.save_dir.lock().await = p;
+async fn clear_history(_app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.history.lock().await.clear();
+    let settings = state.settings.lock().await.clone();
+    save_state_file(&[], &settings);
     Ok(())
+}
+
+#[tauri::command]
+async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
+    Ok(state.settings.lock().await.clone())
+}
+
+#[tauri::command]
+async fn update_settings(
+    state: tauri::State<'_, AppState>,
+    save_dir: Option<String>,
+    app_settings: Option<AppSettings>,
+) -> Result<(), String> {
+    if let Some(dir) = save_dir {
+        let p = PathBuf::from(&dir);
+        if !p.exists() {
+            std::fs::create_dir_all(&p).map_err(|e| format!("mkdir: {e}"))?;
+        }
+        *state.save_dir.lock().await = p;
+    }
+    if let Some(s) = app_settings {
+        *state.settings.lock().await = s.clone();
+        save_state_file(&state.history.lock().await, &s);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn scan_devices() -> Result<Vec<DiscoveredDevice>, String> {
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("bind: {e}"))?;
+    socket.set_broadcast(true).map_err(|e| format!("broadcast: {e}"))?;
+
+    let probe = b"QUICKSHARE_DISCOVER";
+    let _ = socket.send_to(probe, "255.255.255.255:8879").await;
+
+    let our_ips = get_local_ips();
+    let mut devices = Vec::new();
+    let mut buf = [0u8; 1024];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok((len, _src))) => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&buf[..len]) {
+                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let ip = val.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                    if !ip.is_empty() && !our_ips.iter().any(|i| i == ip)
+                        && !devices.iter().any(|d: &DiscoveredDevice| d.ip == ip)
+                    {
+                        devices.push(DiscoveredDevice {
+                            name: name.to_string(),
+                            ip: ip.to_string(),
+                            port: val.get("port").and_then(|v| v.as_u64()).unwrap_or(8877) as u16,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(devices)
 }
 
 // ── Background Server ──
 
 pub async fn run_server(app: AppHandle) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8877u16));
+    let port = app.state::<AppState>().settings.lock().await.port;
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[server] bind: {e}");
+            eprintln!("[server] bind {addr}: {e}");
             return;
         }
     };
@@ -239,6 +378,48 @@ pub async fn run_server(app: AppHandle) {
                 eprintln!("[server] {e}");
             }
         });
+    }
+}
+
+// ── Discovery Service ──
+
+pub async fn run_discovery(app: AppHandle) {
+    let socket = match tokio::net::UdpSocket::bind("0.0.0.0:8879").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[discovery] bind: {e}");
+            return;
+        }
+    };
+
+    let mut buf = [0u8; 256];
+    loop {
+        if app.state::<AppState>().server_shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok((len, src))) => {
+                if &buf[..len] == b"QUICKSHARE_DISCOVER" {
+                    let name = get_hostname();
+                    let ips = get_local_ips();
+                    let port = app.state::<AppState>().settings.lock().await.port;
+                    let response = serde_json::json!({
+                        "name": name,
+                        "ip": pick_lan_ip(&ips).unwrap_or(""),
+                        "port": port,
+                    });
+                    let _ = socket
+                        .send_to(response.to_string().as_bytes(), &src)
+                        .await;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -347,6 +528,7 @@ async fn do_send_file(
     data: &[u8],
     app: &AppHandle,
     tid: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let stream = TcpStream::connect(addr)
         .await
@@ -361,6 +543,9 @@ async fn do_send_file(
     let reader = ChunkReader::new(data, CHUNK_SIZE);
     let mut sent = 0u64;
     for chunk in reader {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
         let c = chunk.map_err(|e| format!("chunk: {e}"))?;
         sender
             .send_chunk(&c)
@@ -371,6 +556,9 @@ async fn do_send_file(
             "transfer-progress",
             serde_json::json!({ "id": tid, "sent": sent, "total": total }),
         );
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
     }
     sender.finish().await.map_err(|e| format!("finish: {e}"))?;
     Ok(())
@@ -383,7 +571,12 @@ async fn do_send_bundle(
     root_name: &str,
     app: &AppHandle,
     tid: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+
     let mut entries = Vec::with_capacity(files.len());
     for (rel, _) in files {
         let full = dir_path.join(&rel);
@@ -404,7 +597,7 @@ async fn do_send_bundle(
         bundle: true,
     };
 
-    do_send_file(addr, file_meta, &compressed, app, tid).await
+    do_send_file(addr, file_meta, &compressed, app, tid, cancel).await
 }
 
 async fn do_send_batch(
@@ -414,6 +607,7 @@ async fn do_send_batch(
     compress: bool,
     app: &AppHandle,
     tid: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let total: u64 = files.iter().map(|(_, s)| s).sum();
     let root = dir_path
@@ -437,6 +631,9 @@ async fn do_send_batch(
 
     let mut sent = 0u64;
     for (rel, _) in files {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
         let full = dir_path.join(&rel);
         let data = std::fs::read(&full).map_err(|e| format!("read: {e}"))?;
         sender
@@ -448,6 +645,9 @@ async fn do_send_batch(
             "transfer-progress",
             serde_json::json!({ "id": tid, "sent": sent, "total": total }),
         );
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
     }
     sender
         .finish()
@@ -468,23 +668,26 @@ async fn register_transfer(state: &AppState, id: &str, name: &str, total: u64) {
 
 async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) {
     let state = app.state::<AppState>();
+    state.cancel_flags.lock().await.remove(id);
+
+    let is_cancelled = matches!(&result, Err(e) if e == "cancelled");
+    let status = if result.is_ok() { "completed" } else if is_cancelled { "cancelled" } else { "failed" };
+
     let mut transfers = state.transfers.lock().await;
     if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
-        t.status = if result.is_ok() {
-            "completed".into()
-        } else {
-            "failed".into()
-        };
-        t.sent = t.total;
+        t.status = status.to_string();
+        // Only mark as fully sent on success; preserve actual progress on failure
+        if result.is_ok() {
+            t.sent = t.total;
+        }
 
-        // Save to history
         let record = HistoryRecord {
             id: t.id.clone(),
             file_name: t.file_name.clone(),
             peer: String::new(),
             direction: "sent".into(),
             size: t.total,
-            status: t.status.clone(),
+            status: status.to_string(),
             timestamp: chrono_now(),
         };
         let mut hist = state.history.lock().await;
@@ -493,29 +696,89 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
             hist.truncate(200);
         }
     }
-    let error = result.err();
-    let _ = app.emit(
-        "transfer-complete",
-        serde_json::json!({ "id": id, "success": error.is_none(), "error": error }),
-    );
+    drop(transfers);
+
+    // Persist after history changes
+    let hist = state.history.lock().await.clone();
+    let settings = state.settings.lock().await.clone();
+    save_state_file(&hist, &settings);
+
+    if !is_cancelled {
+        let error = result.err();
+        let _ = app.emit(
+            "transfer-complete",
+            serde_json::json!({ "id": id, "success": error.is_none(), "error": error }),
+        );
+    }
+}
+
+fn pick_lan_ip(ips: &[String]) -> Option<&str> {
+    // Prefer 192.168.x.x (most common home/office LAN)
+    if let Some(ip) = ips.iter().find(|ip| ip.starts_with("192.168.")) {
+        return Some(ip);
+    }
+    // Then 10.x.x.x (corporate networks)
+    if let Some(ip) = ips.iter().find(|ip| ip.starts_with("10.")) {
+        return Some(ip);
+    }
+    // Then 172.16-31.x.x (RFC 1918 — less common but valid private range)
+    if let Some(ip) = ips.iter().find(|ip| {
+        ip.starts_with("172.") && {
+            ip.split('.').nth(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .map(|n| (16..=31).contains(&n))
+                .unwrap_or(false)
+        }
+    }) {
+        return Some(ip);
+    }
+    // Fallback: first non-loopback IP
+    ips.first().map(|s| s.as_str())
 }
 
 fn get_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+    // Try hostname command first (always accurate), then fallback
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "QuickShare".into())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().map(|s| s.trim().to_string()))
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "QuickShare".into())
 }
 
 fn get_local_ips() -> Vec<String> {
     let mut ips = Vec::new();
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:53").is_ok() {
-            if let Ok(local) = socket.local_addr() {
-                let ip = local.ip().to_string();
-                if !ip.starts_with("127.") {
-                    ips.push(ip);
+    // Enumerate all non-loopback IPv4 interfaces
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            for line in stdout.lines() {
+                if let Some(ip) = line
+                    .split_whitespace()
+                    .nth(3)
+                    .and_then(|s| s.split('/').next())
+                {
+                    if !ip.starts_with("127.") && !ips.contains(&ip.to_string()) {
+                        ips.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: try UDP connect method
+    if ips.is_empty() {
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect("8.8.8.8:53").is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    let ip = local.ip().to_string();
+                    if !ip.starts_with("127.") {
+                        ips.push(ip);
+                    }
                 }
             }
         }
@@ -526,23 +789,24 @@ fn get_local_ips() -> Vec<String> {
 fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs();
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    // Store epoch seconds; frontend formats with browser's local timezone
+    d.as_secs().to_string()
 }
 
 // ── App Entry ──
 
 pub fn run() {
+    let (saved_history, saved_settings) = load_state_file();
+
     let state = AppState {
         server_shutdown: Arc::new(AtomicBool::new(false)),
         save_dir: Arc::new(Mutex::new(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         )),
         transfers: Arc::new(Mutex::new(Vec::new())),
-        history: Arc::new(Mutex::new(Vec::new())),
+        history: Arc::new(Mutex::new(saved_history)),
+        cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+        settings: Arc::new(Mutex::new(saved_settings)),
     };
 
     tauri::Builder::default()
@@ -551,8 +815,32 @@ pub fn run() {
         .manage(state)
         .setup(|app| {
             let handle = app.handle().clone();
+            let disc_handle = handle.clone();
+
+            // Inject bootstrap data into webview (bypasses __TAURI__ IPC dependency)
+            let boot_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                // Give the webview a moment to initialize
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                if let Some(window) = boot_handle.get_webview_window("main") {
+                    let name = get_hostname();
+                    let ips = get_local_ips();
+                    let save_dir_path = boot_handle.state::<AppState>().save_dir.lock().await.clone();
+                    let data = serde_json::json!({
+                        "name": name,
+                        "ips": ips,
+                        "saveDir": save_dir_path.to_string_lossy(),
+                        "port": 8877u16,
+                    });
+                    let _ = window.eval(&format!("window.__BOOTSTRAP_DATA = {};", data));
+                }
+            });
+
             tauri::async_runtime::spawn(async move {
                 run_server(handle).await;
+            });
+            tauri::async_runtime::spawn(async move {
+                run_discovery(disc_handle).await;
             });
             Ok(())
         })
@@ -562,7 +850,10 @@ pub fn run() {
             get_transfers,
             cancel_transfer,
             get_history,
+            clear_history,
+            get_settings,
             update_settings,
+            scan_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

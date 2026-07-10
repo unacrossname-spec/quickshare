@@ -233,6 +233,10 @@ fn collect_dir(base: &Path, dir: &Path, files: &mut Vec<(PathBuf, u64)>) -> Resu
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        // Skip symlinks to prevent infinite recursion
+        if entry.file_type()?.is_symlink() {
+            continue;
+        }
         if path.is_dir() {
             collect_dir(base, &path, files)?;
         } else if path.is_file() {
