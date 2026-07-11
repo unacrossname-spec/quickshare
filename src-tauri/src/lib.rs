@@ -29,6 +29,9 @@ pub struct AppState {
     pub cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub settings: Arc<Mutex<AppSettings>>,
     pub discovery_running: Arc<AtomicBool>,
+    /// Pending incoming transfer requests waiting for user confirmation.
+    /// Maps transfer_id → oneshot sender<bool> (true = accepted, false = declined).
+    pub pending_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +273,31 @@ async fn cancel_transfer(state: tauri::State<'_, AppState>, id: String) -> Resul
 }
 
 #[tauri::command]
+async fn respond_transfer(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    accept: bool,
+) -> Result<(), String> {
+    let sender = state
+        .pending_requests
+        .lock()
+        .await
+        .remove(&request_id)
+        .ok_or_else(|| format!("no pending request: {request_id}"))?;
+    let _ = sender.send(accept);
+    if !accept {
+        // Remove the transfer entry we added when the request came in
+        state.transfers.lock().await.retain(|t| t.id != request_id);
+        let _ = app.emit(
+            "transfer-complete",
+            serde_json::json!({ "id": request_id, "success": false, "error": "declined" }),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_history(state: tauri::State<'_, AppState>) -> Result<Vec<HistoryRecord>, String> {
     Ok(state.history.lock().await.clone())
 }
@@ -464,7 +492,34 @@ fn get_broadcast_addrs() -> Vec<String> {
             }
         }
     }
+    // Fallback for Windows / when `ip` is not available:
+    // Guess subnet-directed broadcast from each local IP (assumes /24).
+    // This covers >95% of home/office LANs and is a safe addition.
+    for ip in get_local_ips() {
+        if let Some(broadcast) = guess_broadcast(&ip) {
+            let addr = format!("{broadcast}:8879");
+            if !addrs.contains(&addr) {
+                addrs.push(addr);
+            }
+        }
+    }
     addrs
+}
+
+/// Guess the subnet broadcast address for an IP, assuming /24.
+fn guess_broadcast(ip: &str) -> Option<String> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 { return None; }
+    // Only for common private ranges where /24 is the norm
+    if ip.starts_with("192.168.")
+        || ip.starts_with("10.")
+        || (ip.starts_with("172.") && {
+            parts[1].parse::<u32>().map(|n| (16..=31).contains(&n)).unwrap_or(false)
+        })
+    {
+        return Some(format!("{}.{}.{}.255", parts[0], parts[1], parts[2]));
+    }
+    None
 }
 
 // ── Background Server ──
@@ -571,17 +626,72 @@ async fn handle_incoming(
 ) -> Result<(), anyhow::Error> {
     let first: serde_json::Value = recv_json(&mut stream).await?;
     let req: ControlMessage = serde_json::from_value(first)?;
-    let meta = match &req {
-        ControlMessage::TransferRequest { file_meta, .. } => file_meta.clone(),
+    let (transfer_id, meta) = match &req {
+        ControlMessage::TransferRequest { transfer_id, file_meta } => (*transfer_id, file_meta.clone()),
         _ => anyhow::bail!("expected TransferRequest"),
     };
 
-    let accept = ControlMessage::TransferAccept {
-        transfer_id: quickshare_core::types::TransferId::new_v4(),
-        received_chunks: vec![],
-    };
-    send_json(&mut stream, &accept).await?;
+    let tid_str = transfer_id.to_string();
+    let peer_str = peer.to_string();
 
+    // Register as incoming transfer so it shows in the UI immediately
+    let state = app.state::<AppState>();
+    state.transfers.lock().await.push(TransferState {
+        id: tid_str.clone(),
+        file_name: format!("来自 {}: {}", peer_str, meta.name),
+        total: meta.size,
+        sent: 0,
+        status: "pending".into(),
+    });
+
+    // Create channel for user confirmation
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.pending_requests.lock().await.insert(tid_str.clone(), tx);
+    drop(state);
+
+    // Ask the frontend user for confirmation
+    let _ = app.emit("incoming-transfer", serde_json::json!({
+        "request_id": tid_str,
+        "peer": peer_str,
+        "file_name": meta.name,
+        "file_size": meta.size,
+    }));
+
+    // Wait for user response (accept/decline)
+    let accepted = rx.await.unwrap_or(false);
+    app.state::<AppState>().pending_requests.lock().await.remove(&tid_str);
+
+    if !accepted {
+        send_json(
+            &mut stream,
+            &ControlMessage::TransferReject {
+                transfer_id,
+                reason: "declined by user".into(),
+            },
+        ).await?;
+        // Remove the pending transfer entry
+        app.state::<AppState>().transfers.lock().await.retain(|t| t.id != tid_str);
+        return Ok(());
+    }
+
+    // User accepted — update transfer status and send accept
+    {
+        let state = app.state::<AppState>();
+        let mut transfers = state.transfers.lock().await;
+        if let Some(t) = transfers.iter_mut().find(|t| t.id == tid_str) {
+            t.status = "active".to_string();
+        }
+    }
+
+    send_json(
+        &mut stream,
+        &ControlMessage::TransferAccept {
+            transfer_id,
+            received_chunks: vec![],
+        },
+    ).await?;
+
+    // Receive chunks with progress tracking
     let mut receiver = FileReceiver::from_handshake(stream, meta.clone());
     let tmp = save_dir.join(&meta.name).with_extension("tmp");
     let mut file = tokio::fs::File::create(&tmp).await?;
@@ -592,12 +702,23 @@ async fn handle_incoming(
             Some((_, data)) => {
                 file.write_all(&data).await?;
                 recvd += data.len() as u64;
+                // Emit receive progress so both sides see it
+                let _ = app.emit(
+                    "transfer-progress",
+                    serde_json::json!({
+                        "id": tid_str,
+                        "sent": recvd,
+                        "total": meta.size,
+                        "direction": "received",
+                    }),
+                );
             }
             None => break,
         }
     }
     drop(file);
 
+    // Process received data (bundle or single file)
     if meta.bundle {
         let data = if meta.compressed {
             let raw = std::fs::read(&tmp)?;
@@ -621,10 +742,12 @@ async fn handle_incoming(
             tokio::fs::write(&full, fdata).await?;
             total += fdata.len() as u64;
         }
+        // Update transfer entry and history
+        finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
             serde_json::json!({
-                "peer": peer.to_string(),
+                "peer": peer_str,
                 "name": meta.name,
                 "count": file_count,
                 "total_bytes": total,
@@ -636,10 +759,11 @@ async fn handle_incoming(
         let data = quickshare_core::compress::decompress(&raw)?;
         let out = save_dir.join(&meta.name);
         tokio::fs::write(&out, &data).await?;
+        finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
             serde_json::json!({
-                "peer": peer.to_string(),
+                "peer": peer_str,
                 "file": meta.name,
                 "size": recvd,
             }),
@@ -647,10 +771,11 @@ async fn handle_incoming(
     } else {
         let out = save_dir.join(&meta.name);
         tokio::fs::rename(&tmp, &out).await?;
+        finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
             serde_json::json!({
-                "peer": peer.to_string(),
+                "peer": peer_str,
                 "file": meta.name,
                 "size": recvd,
             }),
@@ -852,6 +977,35 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
     }
 }
 
+async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, size: u64, success: bool) {
+    let state = app.state::<AppState>();
+    let mut transfers = state.transfers.lock().await;
+    if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
+        t.status = if success { "completed".to_string() } else { "failed".to_string() };
+        t.total = size;
+        t.sent = if success { size } else { t.sent };
+    }
+    // Record in history
+    let record = HistoryRecord {
+        id: id.to_string(),
+        file_name: file_name.to_string(),
+        peer: peer.to_string(),
+        direction: "received".into(),
+        size,
+        status: if success { "completed".to_string() } else { "failed".to_string() },
+        timestamp: chrono_now(),
+    };
+    let mut hist = state.history.lock().await;
+    hist.insert(0, record);
+    if hist.len() > 200 { hist.truncate(200); }
+    // Persist
+    let hist2 = hist.clone();
+    let settings = state.settings.lock().await.clone();
+    drop(transfers);
+    drop(hist);
+    save_state_file(&hist2, &settings);
+}
+
 fn pick_lan_ip(ips: &[String]) -> Option<&str> {
     // Prefer 192.168.x.x (most common home/office LAN)
     if let Some(ip) = ips.iter().find(|ip| ip.starts_with("192.168.")) {
@@ -1002,6 +1156,7 @@ pub fn run() {
         cancel_flags: Arc::new(Mutex::new(HashMap::new())),
         settings: Arc::new(Mutex::new(saved_settings)),
         discovery_running: Arc::new(AtomicBool::new(false)),
+        pending_requests: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()
@@ -1080,6 +1235,7 @@ pub fn run() {
             send_files,
             get_transfers,
             cancel_transfer,
+            respond_transfer,
             get_history,
             clear_history,
             get_discovery_status,

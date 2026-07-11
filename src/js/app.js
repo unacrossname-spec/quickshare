@@ -322,6 +322,10 @@ function setupGlobalListeners() {
     }
     const cancelBtn = e.target.closest('[data-action="cancel-transfer"]');
     if (cancelBtn) { cancelTransfer(cancelBtn.dataset.id); return; }
+    const acceptBtn = e.target.closest('[data-action="accept-transfer"]');
+    if (acceptBtn) { respondTransfer(acceptBtn.dataset.id, true); return; }
+    const declineBtn = e.target.closest('[data-action="decline-transfer"]');
+    if (declineBtn) { respondTransfer(declineBtn.dataset.id, false); return; }
   });
 
   document.querySelectorAll('.bottom-nav-btn').forEach(el => {
@@ -332,7 +336,7 @@ function setupGlobalListeners() {
 // ── Transfer management ──
 function addTransfer(name, total) {
   const id = Date.now().toString();
-  transfers.push({ id, file_name: name, total, sent: 0, status: 'active' });
+  transfers.push({ id, file_name: name, total, sent: 0, status: 'active', direction: 'sent' });
   updateTransferUI();
 
   if (!canInvoke()) simulateTransfer(id);
@@ -374,54 +378,103 @@ function cancelTransfer(id) {
 
 // ── Transfer UI ──
 function updateTransferUI() {
-  const active = document.getElementById('active-transfer');
+  const container = document.getElementById('transfer-cards-container');
   const empty = document.getElementById('transfer-empty');
+  const active = document.getElementById('active-transfer');
   const pending = document.getElementById('transfer-pending');
-  const activeItems = transfers.filter(t => t.status === 'active');
-  const pendingItems = transfers.filter(t => t.status !== 'active');
 
-  if (transfers.length === 0) {
-    active?.classList.add('hidden'); empty?.classList.remove('hidden');
-    pending?.classList.add('hidden'); return;
+  if (!transfers.length) {
+    active?.classList.add('hidden');
+    pending?.classList.add('hidden');
+    empty?.classList.remove('hidden');
+    return;
   }
+
   active?.classList.remove('hidden');
   empty?.classList.add('hidden');
 
-  const cards = document.getElementById('transfer-cards');
-  cards.innerHTML = activeItems.map(t => {
-    const pct = t.total > 0 ? Math.round((t.sent / t.total) * 100) : 0;
-    return `<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl">
-      <div class="flex items-center gap-4 mb-4">
-        <div class="w-10 h-10 bg-primary-container/20 rounded flex items-center justify-center text-primary">
-          <span class="material-symbols-outlined">description</span>
-        </div>
-        <div class="flex-1 min-w-0">
-          <p class="font-medium truncate">${escHtml(t.file_name)}</p>
-          <p class="text-xs text-outline">传输中...</p>
-        </div>
-        <button class="w-9 h-9 rounded-full border border-outline-variant flex items-center justify-center hover:bg-error-container hover:text-error transition-colors" data-action="cancel-transfer" data-id="${t.id}">
-          <span class="material-symbols-outlined text-sm">close</span>
-        </button>
-      </div>
-      <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-      <div class="mt-2 flex justify-between text-xs text-outline">
-        <span class="text-primary font-medium">${pct}%</span>
-        <span>${fmtSize(t.sent)} / ${fmtSize(t.total)}</span>
-      </div>
-    </div>`;
-  }).join('');
+  const nowActive = transfers.filter(t => t.status === 'active');
+  const nowPending = transfers.filter(t => t.status === 'pending');
+  const nowDone = transfers.filter(t => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled');
 
-  if (pendingItems.length > 0) {
+  // ── Active & Pending combined cards (with progress bars) ──
+  const activeAndPending = [...nowActive, ...nowPending];
+  let activeHtml = '';
+  if (activeAndPending.length) {
+    activeHtml = activeAndPending.map(t => {
+      const isPending = t.status === 'pending';
+      const isIncoming = t.direction === 'received';
+      const pct = t.total > 0 ? Math.round((t.sent / t.total) * 100) : 0;
+      const icon = isIncoming ? 'download' : 'upload_file';
+      const statusLabel = isPending
+        ? (isIncoming ? '等待确认...' : '等待连接...')
+        : (isIncoming ? `接收中 ${pct}%` : `发送中 ${pct}%`);
+      const bgColor = isIncoming ? 'bg-tertiary-container/30' : 'bg-primary-container/20';
+      const textColor = isIncoming ? 'text-tertiary' : 'text-primary';
+      const barColor = isIncoming ? 'bg-tertiary' : 'bg-primary';
+      const barReady = isIncoming ? 'bg-tertiary-container' : 'bg-primary-container';
+
+      return `<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded-2xl mb-4">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-10 h-10 ${bgColor} rounded flex items-center justify-center ${textColor}">
+            <span class="material-symbols-outlined">${icon}</span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <p class="font-medium truncate">${escHtml(t.file_name)}</p>
+            <p class="text-xs text-outline">
+              <span class="inline-flex items-center gap-1">
+                ${isIncoming ? '📥 接收' : '📤 发送'}
+                • ${statusLabel}
+              </span>
+            </p>
+          </div>
+          ${isPending && isIncoming
+            ? `<div class="flex gap-2 shrink-0">
+                <button class="px-3 py-1.5 bg-primary text-white rounded-full text-xs font-medium hover:opacity-90" data-action="accept-transfer" data-id="${t.id}">接收</button>
+                <button class="px-3 py-1.5 border border-outline-variant rounded-full text-xs hover:bg-error-container hover:text-error" data-action="decline-transfer" data-id="${t.id}">拒绝</button>
+              </div>`
+            : (t.status === 'active'
+              ? `<button class="w-9 h-9 rounded-full border border-outline-variant flex items-center justify-center hover:bg-error-container hover:text-error transition-colors shrink-0" data-action="cancel-transfer" data-id="${t.id}">
+                  <span class="material-symbols-outlined text-sm">close</span>
+                </button>`
+              : '')
+          }
+        </div>
+        ${isPending
+          ? `<div class="flex items-center justify-center py-2 text-xs text-outline">
+              <span class="animate-pulse">等待${isIncoming ? '确认接收' : '连接'}...</span>
+            </div>`
+          : `<div class="progress-bar"><div class="progress-bar-fill ${barColor}" style="width:${pct}%"></div></div>
+            <div class="mt-2 flex justify-between text-xs text-outline">
+              <span class="${textColor} font-medium">${pct}%</span>
+              <span>${fmtSize(t.sent)} / ${fmtSize(t.total)}</span>
+            </div>`
+        }
+      </div>`;
+    }).join('');
+  }
+
+  // If no active/pending but there are done items, show "done" section
+  const cards = document.getElementById('transfer-cards');
+  if (cards) cards.innerHTML = activeHtml;
+
+  // ── Completed / Failed / Cancelled ──
+  if (nowDone.length > 0) {
     pending?.classList.remove('hidden');
-    document.getElementById('pending-list').innerHTML = pendingItems.map(t =>
-      `<div class="flex items-center gap-3 p-3 hover:bg-surface-container-low rounded-lg transition-colors">
-        <span class="material-symbols-outlined text-outline">description</span>
+    document.getElementById('pending-list').innerHTML = nowDone.map(t => {
+      const isIncoming = t.direction === 'received';
+      const icon = t.status === 'completed' ? 'check_circle' : t.status === 'failed' ? 'error' : 'cancel';
+      const color = t.status === 'completed'
+        ? 'text-primary'
+        : t.status === 'failed' ? 'text-error' : 'text-on-surface-variant';
+      return `<div class="flex items-center gap-3 p-3 hover:bg-surface-container-low rounded-lg transition-colors">
+        <span class="material-symbols-outlined ${color}">${icon}</span>
         <div class="flex-1 min-w-0">
           <p class="text-sm truncate">${escHtml(t.file_name)}</p>
-          <p class="text-xs text-outline">${fmtSize(t.total)} • ${statusText(t.status)}</p>
+          <p class="text-xs text-outline">${isIncoming ? '📥' : '📤'} ${fmtSize(t.total)} • ${statusText(t.status)}</p>
         </div>
-      </div>`
-    ).join('');
+      </div>`;
+    }).join('');
   } else {
     pending?.classList.add('hidden');
   }
@@ -497,9 +550,103 @@ function setupTauriEvents() {
         handleFilePath(f.path, f.size || 0, f.name || 'unknown');
       }
     }
-    // Switch to transfers page to show progress
     if (files.length > 0 && currentPage !== 'transfers') switchPage('transfers');
   });
+  // Incoming transfer request — someone wants to send us a file
+  l('incoming-transfer', e => {
+    const { request_id, peer, file_name, file_size } = e.payload;
+    // Add a pending transfer entry
+    transfers.push({
+      id: request_id,
+      file_name: `${file_name} (来自 ${peer})`,
+      total: file_size,
+      sent: 0,
+      status: 'pending',
+      direction: 'received',
+    });
+    if (currentPage !== 'transfers') switchPage('transfers');
+    updateTransferUI();
+    // Show confirmation dialog
+    showIncomingDialog(request_id, peer, file_name, file_size);
+  });
+}
+
+// ── Incoming Transfer Confirmation Dialog ──
+function showIncomingDialog(requestId, peer, fileName, fileSize) {
+  // Remove any existing dialog
+  const old = document.getElementById('incoming-dialog');
+  if (old) old.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'incoming-dialog';
+  overlay.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+  overlay.innerHTML = `
+    <div class="bg-surface rounded-3xl p-8 max-w-md w-full mx-4 shadow-2xl border border-outline-variant">
+      <div class="text-center mb-6">
+        <div class="w-16 h-16 bg-primary-container rounded-full flex items-center justify-center mx-auto mb-4">
+          <span class="material-symbols-outlined text-3xl text-primary">download</span>
+        </div>
+        <h3 class="text-xl font-bold mb-1">收到传输请求</h3>
+        <p class="text-sm text-outline">来自 ${escHtml(peer)}</p>
+      </div>
+      <div class="bg-surface-container-low rounded-2xl p-4 mb-6 space-y-2">
+        <div class="flex justify-between text-sm">
+          <span class="text-outline">文件名称</span>
+          <span class="font-medium truncate max-w-[200px]">${escHtml(fileName)}</span>
+        </div>
+        <div class="flex justify-between text-sm">
+          <span class="text-outline">文件大小</span>
+          <span class="font-medium">${fmtSize(fileSize)}</span>
+        </div>
+      </div>
+      <div class="flex gap-3">
+        <button id="incoming-decline" class="flex-1 py-3 border border-outline-variant rounded-full font-medium hover:bg-surface-container-low transition-colors">
+          拒绝
+        </button>
+        <button id="incoming-accept" class="flex-1 py-3 bg-primary text-white rounded-full font-medium hover:opacity-90 transition-opacity">
+          接收
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#incoming-accept').addEventListener('click', () => {
+    overlay.remove();
+    respondTransfer(requestId, true);
+  });
+  overlay.querySelector('#incoming-decline').addEventListener('click', () => {
+    overlay.remove();
+    respondTransfer(requestId, false);
+  });
+  // Click outside to decline
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) {
+      overlay.remove();
+      respondTransfer(requestId, false);
+    }
+  });
+}
+
+async function respondTransfer(requestId, accept) {
+  // Remove any confirmation dialog
+  const dialog = document.getElementById('incoming-dialog');
+  if (dialog) dialog.remove();
+
+  if (!canInvoke()) {
+    const t = transfers.find(x => x.id === requestId);
+    if (t) t.status = accept ? 'active' : 'cancelled';
+    updateTransferUI();
+    return;
+  }
+  try {
+    await tauriInvoke('respond_transfer', { requestId, accept });
+  } catch (e) {
+    console.error('respond_transfer:', e);
+  }
+  // Refresh transfers from backend
+  try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
+  updateTransferUI();
 }
 
 // ── Settings ──
