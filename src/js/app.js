@@ -92,6 +92,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // Auto-scan LAN devices on startup
+  if (canInvoke()) scanDevices();
+
   // Port input change handler
   const portInput = document.querySelector('#page-settings input[type="text"]');
   if (portInput) {
@@ -104,7 +107,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  setupTauriEvents();
+  // Speed unit selector
+  const speedSel = document.getElementById('speed-unit-select');
+  if (speedSel) {
+    syncSpeedUnitUI();
+    speedSel.addEventListener('change', () => {
+      speedUnit = speedSel.value;
+      localStorage.setItem('qs_speedUnit', speedUnit);
+      if (currentPage === 'transfers') updateTransferUI();
+    });
+  }
+
+  // ── At this point the app is fully initialized ──
 });
 
 async function waitForInit(maxMs) {
@@ -187,7 +201,7 @@ function showPeers() {
         <h4 class="font-medium truncate">${escHtml(p.name)}</h4>
         <p class="text-xs text-outline truncate">${p.ip}</p>
       </div>
-      <button class="send-btn px-4 py-2 text-xs font-medium rounded-full transition-colors ${p.ip === selectedTarget ? 'bg-primary text-white' : 'bg-primary-container text-on-primary-container hover:bg-primary hover:text-white'}">${p.ip === selectedTarget ? '已选择' : '发送'}</button>
+      <button class="send-btn px-4 py-2 text-xs font-medium rounded-full transition-colors ${p.ip === selectedTarget ? 'bg-primary text-white' : 'bg-primary-container text-on-primary-container hover:bg-primary hover:text-white'}">${p.ip === selectedTarget ? '已选择' : '选择'}</button>
     </div>
   `).join('');
   grid.querySelectorAll('.send-btn').forEach((btn, i) =>
@@ -303,10 +317,13 @@ function handleFilePath(filePath, fileSize, fileName) {
     }
   }).catch(e => {
     console.error('send failed:', e);
+    delete transferSpeeds[tempId];
     const t = transfers.find(x => x.id === tempId);
-    if (t) t.status = 'failed';
-    updateTransferUI();
-    alert('发送失败: ' + e);
+    if (t) { t.status = 'failed'; updateTransferUI(); }
+    // Check if transfer was already completed (race): only alert if still pending
+    if (transfers.find(x => x.id === tempId)) {
+      alert('发送失败: ' + e);
+    }
   });
 }
 
@@ -470,7 +487,6 @@ function updateTransferUI() {
             <div class="mt-2 flex justify-between items-center text-xs text-outline">
               <span class="${textColor} font-medium">${pct}%</span>
               <span class="cursor-pointer hover:text-on-surface transition-colors"
-                    onclick="cycleSpeedUnit()"
                     title="点击切换单位">${fmtSpeed(transferSpeeds[t.id]?.bytesPerSec || 0)}</span>
               <span>${fmtSize(t.sent)} / ${fmtSize(t.total)}</span>
             </div>`
@@ -521,6 +537,7 @@ function renderHistory() {
         <div><p class="text-sm font-medium">${escHtml(h.file_name)}</p><p class="text-xs text-outline">${h.direction === 'sent' ? '发出' : '接收'}</p></div>
       </div></td>
       <td class="px-6 py-4 text-sm">${fmtSize(h.size)}</td>
+      <td class="px-6 py-4 text-sm text-outline">${h.speed ? fmtSpeed(h.speed) : '-'}</td>
       <td class="px-6 py-4 text-sm">${h.peer || '-'}</td>
       <td class="px-6 py-4">${statusBadge(h.status)}</td>
       <td class="px-6 py-4 text-sm text-outline text-right">${fmtTime(h.timestamp)}</td>
@@ -547,6 +564,11 @@ function syncSettingsUI() {
 function syncPortInput() {
   const input = document.querySelector('#page-settings input[type="text"]');
   if (input) input.value = appSettings.port || 8877;
+}
+
+function syncSpeedUnitUI() {
+  const sel = document.getElementById('speed-unit-select');
+  if (sel) sel.value = speedUnit;
 }
 
 // ── Tauri Events ──

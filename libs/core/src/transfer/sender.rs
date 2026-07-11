@@ -97,6 +97,9 @@ pub async fn send_json(stream: &mut TcpStream, msg: &impl serde::Serialize) -> R
 pub async fn recv_json<T: serde::de::DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
     use tokio::io::AsyncReadExt;
     let len = stream.read_u32_le().await?;
+    if len > 1_000_000 {
+        anyhow::bail!("json message too large: {len} bytes (max 1MB)");
+    }
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf).await?;
     Ok(serde_json::from_slice(&buf)?)

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, WebviewEvent};
@@ -18,6 +18,29 @@ use quickshare_core::transport::tcp::{TcpListener, TcpStream};
 use quickshare_core::types::{ControlMessage, FileMeta};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+// ── Drop guard for cleaning up temp files ──
+
+struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+    fn disarm(&mut self) {
+        self.path.take();
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
 
 // ── State ──
 
@@ -41,6 +64,8 @@ pub struct TransferState {
     pub total: u64,
     pub sent: u64,
     pub status: String,
+    #[serde(skip_serializing)]
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +93,8 @@ pub struct HistoryRecord {
     pub size: u64,
     pub status: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub speed: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,14 +167,25 @@ fn load_state_file() -> (Vec<HistoryRecord>, AppSettings) {
 }
 
 fn save_state_file(history: &[HistoryRecord], settings: &AppSettings) {
+    // Serialize writes with a global lock to prevent concurrent-write races.
+    use std::sync::OnceLock;
+    static SAVE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    let _guard = SAVE_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap();
+
     #[derive(Serialize)]
     struct Persisted<'a> {
         history: &'a [HistoryRecord],
         settings: &'a AppSettings,
     }
     let path = state_path();
-    if let Ok(data) = serde_json::to_string(&Persisted { history, settings }) {
-        let _ = std::fs::write(&path, &data);
+    let data = match serde_json::to_string(&Persisted { history, settings }) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    // Write to a temp file first, then atomically rename.
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &data).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }
 
@@ -658,20 +696,23 @@ async fn handle_incoming(
     let peer_str = peer.to_string();
     eprintln!("[server] TransferRequest from {peer_str}: file={} size={}", meta.name, meta.size);
 
-    // Register as incoming transfer so it shows in the UI immediately
-    let state = app.state::<AppState>();
-    state.transfers.lock().await.push(TransferState {
-        id: tid_str.clone(),
-        file_name: format!("来自 {}: {}", peer_str, meta.name),
-        total: meta.size,
-        sent: 0,
-        status: "pending".into(),
-    });
-
-    // Create channel for user confirmation
+    // Register as incoming transfer so it shows in the UI immediately,
+    // and create a oneshot channel for user confirmation.
+    // Acquire pending_requests BEFORE transfers to match the lock order
+    // in respond_transfer and avoid deadlock.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.pending_requests.lock().await.insert(tid_str.clone(), tx);
-    drop(state);
+    {
+        let state = app.state::<AppState>();
+        state.pending_requests.lock().await.insert(tid_str.clone(), tx);
+        state.transfers.lock().await.push(TransferState {
+            id: tid_str.clone(),
+            file_name: format!("来自 {}: {}", peer_str, meta.name),
+            total: meta.size,
+            sent: 0,
+            status: "pending".into(),
+            started_at: 0,
+        });
+    }
 
     // Ask the frontend user for confirmation
     eprintln!("[server] {tid_str}: emitting incoming-transfer event");
@@ -682,20 +723,28 @@ async fn handle_incoming(
         "file_size": meta.size,
     }));
 
-    // Wait for user response (accept/decline)
+    // Wait for user response (accept/decline) with a 120-second timeout
     eprintln!("[server] {tid_str}: waiting for user confirmation...");
-    let accepted = rx.await.unwrap_or(false);
+    let accepted = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        rx,
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(false);
     eprintln!("[server] {tid_str}: user responded accepted={accepted}");
     app.state::<AppState>().pending_requests.lock().await.remove(&tid_str);
 
     if !accepted {
-        send_json(
+        let reason = "declined or timed out".to_string();
+        let _ = send_json(
             &mut stream,
             &ControlMessage::TransferReject {
                 transfer_id,
-                reason: "declined by user".into(),
+                reason,
             },
-        ).await?;
+        ).await;
         // Remove the pending transfer entry
         app.state::<AppState>().transfers.lock().await.retain(|t| t.id != tid_str);
         return Ok(());
@@ -707,6 +756,7 @@ async fn handle_incoming(
         let mut transfers = state.transfers.lock().await;
         if let Some(t) = transfers.iter_mut().find(|t| t.id == tid_str) {
             t.status = "active".to_string();
+            t.started_at = chrono_now_ms();
         }
     }
 
@@ -721,10 +771,16 @@ async fn handle_incoming(
     // Receive chunks with progress tracking
     let mut receiver = FileReceiver::from_handshake(stream, meta.clone());
     let tmp = save_dir.join(&meta.name).with_extension("tmp");
+    let mut tmp_guard = TempFileGuard::new(tmp.clone());
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut recvd = 0u64;
 
     loop {
+        // Check if transfer was cancelled
+        if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
+            eprintln!("[server] {tid_str}: cancelled by user");
+            break;
+        }
         let chunk = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             receiver.recv_chunk(),
@@ -756,14 +812,23 @@ async fn handle_incoming(
     }
     drop(file);
 
+    // Check if cancelled while receiving — clean up tmp file and bail
+    if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
+        // tmp_guard drops here, cleaning up the temp file
+        finish_receive(app, &tid_str, &peer_str, &meta.name, recvd, false).await;
+        return Ok(());
+    }
+
     // Process received data (bundle or single file)
     if meta.bundle {
         let data = if meta.compressed {
             let raw = std::fs::read(&tmp)?;
+            tmp_guard.disarm();
             tokio::fs::remove_file(&tmp).await?;
             quickshare_core::compress::decompress(&raw)?
         } else {
             let raw = std::fs::read(&tmp)?;
+            tmp_guard.disarm();
             tokio::fs::remove_file(&tmp).await?;
             raw
         };
@@ -793,6 +858,7 @@ async fn handle_incoming(
         );
     } else if meta.compressed {
         let raw = std::fs::read(&tmp)?;
+        tmp_guard.disarm();
         tokio::fs::remove_file(&tmp).await?;
         let data = quickshare_core::compress::decompress(&raw)?;
         let out = save_dir.join(&meta.name);
@@ -808,6 +874,7 @@ async fn handle_incoming(
         );
     } else {
         let out = save_dir.join(&meta.name);
+        tmp_guard.disarm();
         tokio::fs::rename(&tmp, &out).await?;
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
@@ -992,6 +1059,7 @@ async fn register_transfer(state: &AppState, id: &str, name: &str, total: u64) {
         total,
         sent: 0,
         status: "active".into(),
+        started_at: chrono_now_ms(),
     });
 }
 
@@ -1010,6 +1078,9 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
             t.sent = t.total;
         }
 
+        let elapsed = std::cmp::max(chrono_now_ms().saturating_sub(t.started_at), 1);
+        let speed = (t.total as f64) / (elapsed as f64 / 1000.0);
+
         let record = HistoryRecord {
             id: t.id.clone(),
             file_name: t.file_name.clone(),
@@ -1018,6 +1089,7 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
             size: t.total,
             status: status.to_string(),
             timestamp: chrono_now(),
+            speed,
         };
         let mut hist = state.history.lock().await;
         hist.insert(0, record);
@@ -1044,11 +1116,15 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
 async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, size: u64, success: bool) {
     let state = app.state::<AppState>();
     let mut transfers = state.transfers.lock().await;
-    if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
+    let speed = if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
         t.status = if success { "completed".to_string() } else { "failed".to_string() };
         t.total = size;
         t.sent = if success { size } else { t.sent };
-    }
+        let elapsed = std::cmp::max(chrono_now_ms().saturating_sub(t.started_at), 1);
+        (size as f64) / (elapsed as f64 / 1000.0)
+    } else {
+        0.0
+    };
     // Emit final progress at 100% so the receiver's frontend shows full bar
     if success {
         let _ = app.emit("transfer-progress", serde_json::json!({
@@ -1066,6 +1142,7 @@ async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, 
         size,
         status: if success { "completed".to_string() } else { "failed".to_string() },
         timestamp: chrono_now(),
+        speed,
     };
     let mut hist = state.history.lock().await;
     hist.insert(0, record);
@@ -1211,6 +1288,13 @@ fn chrono_now() -> String {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     // Store epoch seconds; frontend formats with browser's local timezone
     d.as_secs().to_string()
+}
+
+fn chrono_now_ms() -> u64 {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    d.as_millis() as u64
 }
 
 // ── App Entry ──

@@ -176,6 +176,7 @@ tailwind.config = {
             <tr class="bg-surface-container-low border-b border-outline-variant text-xs font-bold text-outline uppercase tracking-wider">
               <th class="px-6 py-4">文件名称</th>
               <th class="px-6 py-4">大小</th>
+              <th class="px-6 py-4">速度</th>
               <th class="px-6 py-4">目标/来源</th>
               <th class="px-6 py-4">状态</th>
               <th class="px-6 py-4 text-right">时间</th>
@@ -223,6 +224,20 @@ tailwind.config = {
                 <div class="min-w-0"><p class="font-medium text-sm truncate">小文件打包</p><p class="text-xs text-outline truncate">目录自动打包</p></div>
               </div>
               <span class="toggle on" data-setting="bundle"></span>
+            </label>
+            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant">
+              <div class="flex items-center gap-3 min-w-0">
+                <span class="material-symbols-outlined text-on-surface-variant shrink-0">speed</span>
+                <div class="min-w-0"><p class="font-medium text-sm truncate">速度单位</p><p class="text-xs text-outline truncate">传输速率显示单位</p></div>
+              </div>
+              <select id="speed-unit-select" class="bg-surface-container-low border border-outline-variant rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary">
+                <option value="B/s">B/s</option>
+                <option value="KB/s">KB/s</option>
+                <option value="MB/s" selected>MB/s</option>
+                <option value="GB/s">GB/s</option>
+                <option value="Mbps">Mbps</option>
+                <option value="Gbps">Gbps</option>
+              </select>
             </label>
           </div>
         </div>
