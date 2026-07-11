@@ -369,6 +369,12 @@ function simulateTransfer(id) {
 }
 
 function cancelTransfer(id) {
+  const t = transfers.find(x => x.id === id);
+  // For pending incoming transfers, use respond_transfer to decline
+  if (t && t.status === 'pending' && t.direction === 'received') {
+    respondTransfer(id, false);
+    return;
+  }
   if (canInvoke()) {
     tauriInvoke('cancel_transfer', { id })
       .then(() => {
@@ -560,7 +566,11 @@ function setupTauriEvents() {
   });
   // Incoming transfer request — someone wants to send us a file
   l('incoming-transfer', e => {
-    const { request_id, peer, file_name, file_size } = e.payload;
+    console.log('[incoming-transfer] received:', JSON.stringify(e));
+    const payload = e.payload || e;
+    const { request_id, peer, file_name, file_size } = payload;
+    console.log('[incoming-transfer] request_id:', request_id, 'peer:', peer, 'file:', file_name);
+
     // Add a pending transfer entry
     transfers.push({
       id: request_id,
@@ -572,12 +582,15 @@ function setupTauriEvents() {
     });
     if (currentPage !== 'transfers') switchPage('transfers');
     updateTransferUI();
-    // Show confirmation dialog
+
+    // Show confirmation dialog with inline styles (no CSS dependency)
     showIncomingDialog(request_id, peer, file_name, file_size);
   });
 }
 
 // ── Incoming Transfer Confirmation Dialog ──
+// Uses ONLY inline styles (no Tailwind classes) to guarantee visibility
+// regardless of the Tailwind CDN state or CSS load order.
 function showIncomingDialog(requestId, peer, fileName, fileSize) {
   // Remove any existing dialog
   const old = document.getElementById('incoming-dialog');
@@ -585,36 +598,35 @@ function showIncomingDialog(requestId, peer, fileName, fileSize) {
 
   const overlay = document.createElement('div');
   overlay.id = 'incoming-dialog';
-  overlay.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-  overlay.innerHTML = `
-    <div class="bg-surface rounded-3xl p-8 max-w-md w-full mx-4 shadow-2xl border border-outline-variant">
-      <div class="text-center mb-6">
-        <div class="w-16 h-16 bg-primary-container rounded-full flex items-center justify-center mx-auto mb-4">
-          <span class="material-symbols-outlined text-3xl text-primary">download</span>
-        </div>
-        <h3 class="text-xl font-bold mb-1">收到传输请求</h3>
-        <p class="text-sm text-outline">来自 ${escHtml(peer)}</p>
-      </div>
-      <div class="bg-surface-container-low rounded-2xl p-4 mb-6 space-y-2">
-        <div class="flex justify-between text-sm">
-          <span class="text-outline">文件名称</span>
-          <span class="font-medium truncate max-w-[200px]">${escHtml(fileName)}</span>
-        </div>
-        <div class="flex justify-between text-sm">
-          <span class="text-outline">文件大小</span>
-          <span class="font-medium">${fmtSize(fileSize)}</span>
-        </div>
-      </div>
-      <div class="flex gap-3">
-        <button id="incoming-decline" class="flex-1 py-3 border border-outline-variant rounded-full font-medium hover:bg-surface-container-low transition-colors">
-          拒绝
-        </button>
-        <button id="incoming-accept" class="flex-1 py-3 bg-primary text-white rounded-full font-medium hover:opacity-90 transition-opacity">
-          接收
-        </button>
-      </div>
-    </div>
-  `;
+  overlay.style.cssText =
+    'position:fixed;top:0;left:0;right:0;bottom:0;' +
+    'background:rgba(0,0,0,0.55);' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'z-index:99999;font-family:-apple-system,BlinkMacSystemFont,sans-serif;';
+
+  overlay.innerHTML =
+    '<div style="background:#fff;border-radius:1.5rem;padding:2rem;max-width:26rem;width:90%;' +
+    'box-shadow:0 1rem 3rem rgba(0,0,0,0.35);text-align:center;">' +
+      '<div style="font-size:3rem;line-height:1;margin-bottom:1rem;">📥</div>' +
+      '<h3 style="font-size:1.25rem;font-weight:700;margin:0 0 0.25rem;color:#191c1e;">收到传输请求</h3>' +
+      '<p style="font-size:0.875rem;color:#6b7a7d;margin:0 0 1.5rem;">来自 ' + escHtml(peer) + '</p>' +
+      '<div style="background:#f2f4f6;border-radius:0.75rem;padding:1rem;margin-bottom:1.5rem;text-align:left;">' +
+        '<div style="display:flex;justify-content:space-between;margin-bottom:0.5rem;font-size:0.875rem;">' +
+          '<span style="color:#6b7a7d;">文件名称</span>' +
+          '<span style="font-weight:600;color:#191c1e;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(fileName) + '</span>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:0.875rem;">' +
+          '<span style="color:#6b7a7d;">文件大小</span>' +
+          '<span style="font-weight:600;color:#191c1e;">' + fmtSize(fileSize) + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:0.75rem;">' +
+        '<button id="incoming-decline" style="flex:1;padding:0.75rem;border:1px solid #bac9cc;border-radius:6.25rem;' +
+        'font-size:0.9375rem;font-weight:500;background:#fff;color:#191c1e;cursor:pointer;">拒绝</button>' +
+        '<button id="incoming-accept" style="flex:1;padding:0.75rem;border:none;border-radius:6.25rem;' +
+        'font-size:0.9375rem;font-weight:600;background:#006875;color:#fff;cursor:pointer;">接收</button>' +
+      '</div>' +
+    '</div>';
   document.body.appendChild(overlay);
 
   overlay.querySelector('#incoming-accept').addEventListener('click', () => {
