@@ -62,6 +62,7 @@ impl FileReceiver {
         match self.stream.read_exact(&mut hdr).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
             Err(e) => anyhow::bail!(e),
         }
 

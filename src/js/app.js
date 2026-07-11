@@ -36,6 +36,10 @@ let appSettings = {
   port: 8877,
 };
 
+// ── Transfer speed tracking ──
+let transferSpeeds = {}; // id → {lastBytes, lastTime, bytesPerSec}
+let speedUnit = localStorage.getItem('qs_speedUnit') || 'MB/s';
+
 // ── Init ──
 // IMPORTANT: Register event listeners BEFORE any async init to avoid
 // missing events (e.g., incoming-transfer) that arrive during startup.
@@ -375,6 +379,7 @@ function simulateTransfer(id) {
 
 function cancelTransfer(id) {
   const t = transfers.find(x => x.id === id);
+  delete transferSpeeds[id];
   // For pending incoming transfers, use respond_transfer to decline
   if (t && t.status === 'pending' && t.direction === 'received') {
     respondTransfer(id, false);
@@ -462,8 +467,11 @@ function updateTransferUI() {
               <span class="animate-pulse">等待${isIncoming ? '确认接收' : '连接'}...</span>
             </div>`
           : `<div class="progress-bar"><div class="progress-bar-fill ${barColor}" style="width:${pct}%"></div></div>
-            <div class="mt-2 flex justify-between text-xs text-outline">
+            <div class="mt-2 flex justify-between items-center text-xs text-outline">
               <span class="${textColor} font-medium">${pct}%</span>
+              <span class="cursor-pointer hover:text-on-surface transition-colors"
+                    onclick="cycleSpeedUnit()"
+                    title="点击切换单位">${fmtSpeed(transferSpeeds[t.id]?.bytesPerSec || 0)}</span>
               <span>${fmtSize(t.sent)} / ${fmtSize(t.total)}</span>
             </div>`
         }
@@ -548,15 +556,40 @@ function setupTauriEvents() {
     const { id, sent, total } = e.payload;
     const t = transfers.find(x => x.id === id);
     if (t) { t.sent = sent; t.total = total; }
+
+    // Speed tracking
+    const now = performance.now();
+    const prev = transferSpeeds[id];
+    if (prev && prev.lastBytes !== undefined && sent > prev.lastBytes) {
+      const deltaBytes = sent - prev.lastBytes;
+      const deltaSec = (now - prev.lastTime) / 1000;
+      if (deltaSec > 0) {
+        const instant = deltaBytes / deltaSec;
+        prev.bytesPerSec = prev.bytesPerSec
+          ? prev.bytesPerSec * 0.7 + instant * 0.3
+          : instant;
+      }
+    } else {
+      transferSpeeds[id] = { lastBytes: sent, lastTime: now, bytesPerSec: prev?.bytesPerSec || 0 };
+    }
+    if (prev) { prev.lastBytes = sent; prev.lastTime = now; }
+
     if (currentPage === 'transfers') updateTransferUI();
   });
   l('transfer-complete', async () => {
     try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
     try { history = await tauriInvoke('get_history') || []; } catch {}
+    // Clean up speed tracking for completed transfers
+    const activeIds = new Set(transfers.map(t => t.id));
+    Object.keys(transferSpeeds).forEach(id => { if (!activeIds.has(id)) delete transferSpeeds[id]; });
     if (currentPage === 'transfers') updateTransferUI();
   });
   l('receive-complete', async () => {
+    try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
     try { history = await tauriInvoke('get_history') || []; } catch {}
+    const activeIds = new Set(transfers.map(t => t.id));
+    Object.keys(transferSpeeds).forEach(id => { if (!activeIds.has(id)) delete transferSpeeds[id]; });
+    if (currentPage === 'transfers') updateTransferUI();
     if (currentPage === 'history') renderHistory();
   });
   // Native file drag-and-drop (handled by Rust → emitted as 'file-dropped')
@@ -711,6 +744,33 @@ function pickLanIp(ips) {
     && !ip.startsWith('172.17.')
   ) || ips[0];
 }
+
+const SPEED_UNITS = [
+  { key: 'B/s',   divisor: 1 },
+  { key: 'KB/s',  divisor: 1e3 },
+  { key: 'MB/s',  divisor: 1e6 },
+  { key: 'GB/s',  divisor: 1e9 },
+  { key: 'Mbps',  divisor: 1e6 / 8 },
+  { key: 'Gbps',  divisor: 1e9 / 8 },
+];
+
+function fmtSpeed(bytesPerSec) {
+  const unit = SPEED_UNITS.find(u => u.key === speedUnit) || SPEED_UNITS[2];
+  const val = bytesPerSec / unit.divisor;
+  if (val < 0.01) return '<0.01 ' + unit.key;
+  if (val < 10) return val.toFixed(2) + ' ' + unit.key;
+  if (val < 100) return val.toFixed(1) + ' ' + unit.key;
+  return Math.round(val) + ' ' + unit.key;
+}
+
+function cycleSpeedUnit() {
+  const keys = SPEED_UNITS.map(u => u.key);
+  const idx = keys.indexOf(speedUnit);
+  speedUnit = keys[(idx + 1) % keys.length];
+  localStorage.setItem('qs_speedUnit', speedUnit);
+  if (currentPage === 'transfers') updateTransferUI();
+}
+
 function fmtSize(bytes) {
   if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
   if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';

@@ -726,14 +726,12 @@ async fn handle_incoming(
 
     loop {
         let chunk = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(120),
             receiver.recv_chunk(),
         )
-        .await
-        .map_err(|_| anyhow::anyhow!("接收数据超时: 30秒未收到数据"))?
-        .map_err(|e| anyhow::anyhow!("接收块失败: {e}"))?;
+        .await;
         match chunk {
-            Some((_, data)) => {
+            Ok(Ok(Some((_, data)))) => {
                 file.write_all(&data).await?;
                 recvd += data.len() as u64;
                 // Emit receive progress so both sides see it
@@ -747,7 +745,13 @@ async fn handle_incoming(
                     }),
                 );
             }
-            None => break,
+            Ok(Ok(None)) => break,        // done marker or connection closed
+            Ok(Err(e)) => {
+                anyhow::bail!("接收块失败: {e}");
+            }
+            Err(_) => {
+                anyhow::bail!("接收数据超时: 发送端120秒未响应");
+            }
         }
     }
     drop(file);
@@ -1044,6 +1048,14 @@ async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, 
         t.status = if success { "completed".to_string() } else { "failed".to_string() };
         t.total = size;
         t.sent = if success { size } else { t.sent };
+    }
+    // Emit final progress at 100% so the receiver's frontend shows full bar
+    if success {
+        let _ = app.emit("transfer-progress", serde_json::json!({
+            "id": id,
+            "sent": size,
+            "total": size,
+        }));
     }
     // Record in history
     let record = HistoryRecord {
