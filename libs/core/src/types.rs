@@ -45,6 +45,10 @@ pub struct FileMeta {
     /// When false (default), the entire file was compressed as one blob.
     #[serde(default)]
     pub stream: bool,
+    /// Data is AES-256-GCM encrypted per chunk.
+    /// The encryption key is derived from a pre-shared password (never transmitted).
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -74,6 +74,7 @@ pub struct SendOptions {
     pub path: String,
     pub compress: bool,
     pub bundle: bool,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,11 +105,15 @@ pub struct AppSettings {
     pub bundle: bool,
     pub notifications_enabled: bool,
     pub port: u16,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub password: String,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { compress: true, bundle: true, notifications_enabled: true, port: 8877 }
+        Self { compress: true, bundle: true, notifications_enabled: true, port: 8877, encrypted: false, password: String::new() }
     }
 }
 
@@ -244,12 +249,14 @@ async fn send_single(
         compressed: opts.compress,
         bundle: false,
         stream: true,  // per-chunk independent compression
+        encrypted: opts.encrypted,
     };
 
     eprintln!("[send_single] file={file_name} size={file_size} addr={addr}");
 
     let tid = uuid::Uuid::new_v4().to_string();
     register_transfer(&state, &tid, &file_name, file_size).await;
+    let data_password = state.settings.lock().await.password.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
@@ -257,7 +264,7 @@ async fn send_single(
     let tid2 = tid.clone();
     tauri::async_runtime::spawn(async move {
         eprintln!("[send_single] {tid2}: connecting to {addr}...");
-        let r = do_send_file_streaming(addr, meta, &file_path, &app, &tid2, cancel).await;
+        let r = do_send_file_streaming(addr, meta, &file_path, &app, &tid2, cancel, &data_password).await;
         eprintln!("[send_single] {tid2}: result={}", r.is_ok());
         finish_transfer(&app, &tid2, r).await;
     });
@@ -781,6 +788,14 @@ async fn handle_incoming(
         None
     };
 
+    // Derive decryption key from the configured password (if transfer is encrypted)
+    let dec_key = if meta.encrypted {
+        let pwd = app.state::<AppState>().settings.lock().await.password.clone();
+        Some(quickshare_core::crypto::derive_key(&pwd))
+    } else {
+        None
+    };
+
     loop {
         // Check if transfer was cancelled
         if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
@@ -795,8 +810,14 @@ async fn handle_incoming(
         match chunk {
             Ok(Ok(Some((_, data)))) => {
                 if let Some(ref mut of) = out_file {
-                    // Streaming: decompress this chunk's data and write to output
-                    let decompressed = quickshare_core::compress::decompress(&data)
+                    // Streaming: decrypt (if enabled), decompress, write
+                    let decrypted = if let Some(ref key) = dec_key {
+                        quickshare_core::crypto::decrypt(key, &data)
+                            .map_err(|e| anyhow::anyhow!("解密失败: {e}"))?
+                    } else {
+                        data
+                    };
+                    let decompressed = quickshare_core::compress::decompress(&decrypted)
                         .map_err(|e| anyhow::anyhow!("decompress chunk: {e}"))?;
                     of.write_all(&decompressed).await?;
                     recvd += decompressed.len() as u64;
@@ -1000,6 +1021,7 @@ async fn do_send_file_streaming(
     app: &AppHandle,
     tid: &str,
     cancel: Arc<AtomicBool>,
+    password: &str,
 ) -> Result<(), String> {
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -1030,6 +1052,13 @@ async fn do_send_file_streaming(
     let reader = ChunkReader::new(file, CHUNK_SIZE);
     let mut sent = 0u64;
 
+    // Derive encryption key from password (if encryption is enabled)
+    let enc_key = if meta.encrypted {
+        Some(quickshare_core::crypto::derive_key(password))
+    } else {
+        None
+    };
+
     for chunk in reader {
         if cancel.load(Ordering::SeqCst) {
             return Err("cancelled".into());
@@ -1039,19 +1068,26 @@ async fn do_send_file_streaming(
 
         // Compress each chunk independently if compression is enabled.
         // Always produce a valid LZ4 frame so the receiver can decompress it.
-        let (send_data, chunk_hash) = if meta.compressed {
-            let compressed = quickshare_core::compress::compress_always(&c.data);
-            let hash = *blake3::hash(&compressed).as_bytes();
-            (compressed, hash)
+        let send_data = if meta.compressed {
+            quickshare_core::compress::compress_always(&c.data)
         } else {
-            (c.data, c.hash)
+            c.data
         };
+
+        // Encrypt the chunk data if encryption is enabled
+        let send_data = if let Some(ref key) = enc_key {
+            quickshare_core::crypto::encrypt(key, &send_data)
+        } else {
+            send_data
+        };
+
+        let hash = *blake3::hash(&send_data).as_bytes();
 
         let wire_chunk = quickshare_core::transfer::chunk::Chunk {
             index: c.index,
             offset: c.offset,
             data: send_data,
-            hash: chunk_hash,
+            hash,
         };
 
         sender
@@ -1106,6 +1142,7 @@ async fn do_send_bundle(
         compressed: compressed.len() < bundle.len(),
         bundle: true,
         stream: false,
+        encrypted: false,
     };
 
     do_send_file(addr, file_meta, &compressed, app, tid, cancel).await

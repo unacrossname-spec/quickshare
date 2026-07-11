@@ -34,6 +34,8 @@ let appSettings = {
   bundle: true,
   notificationsEnabled: true,
   port: 8877,
+  encrypted: false,
+  password: '',
 };
 
 // ── Transfer speed tracking ──
@@ -87,6 +89,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       appSettings.bundle = settingsResult.bundle;
       appSettings.notificationsEnabled = settingsResult.notificationsEnabled;
       appSettings.port = settingsResult.port;
+      appSettings.encrypted = settingsResult.encrypted || false;
+      appSettings.password = settingsResult.password || '';
       syncSettingsUI();
       syncPortInput();
     }
@@ -117,6 +121,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (currentPage === 'transfers') updateTransferUI();
     });
   }
+
+  // Encryption password field
+  syncPasswordUI();
+  const pwdInput = document.getElementById('encryption-password');
+  if (pwdInput) {
+    pwdInput.addEventListener('input', () => {
+      appSettings.password = pwdInput.value;
+      if (canInvoke()) tauriInvoke('update_settings', { appSettings }).catch(() => {});
+    });
+  }
+  document.getElementById('password-toggle-vis')?.addEventListener('click', () => {
+    const pwd = document.getElementById('encryption-password');
+    if (!pwd) return;
+    const btn = document.getElementById('password-toggle-vis');
+    if (pwd.type === 'password') {
+      pwd.type = 'text';
+      if (btn) btn.textContent = '隐藏';
+    } else {
+      pwd.type = 'password';
+      if (btn) btn.textContent = '显示';
+    }
+  });
 
   // ── At this point the app is fully initialized ──
 });
@@ -308,7 +334,7 @@ function handleFilePath(filePath, fileSize, fileName) {
 
   console.log('[handleFilePath] invoking send_files...');
   tauriInvoke('send_files', {
-    opts: { addr: selectedTarget, path: filePath, compress: appSettings.compress, bundle: appSettings.bundle }
+    opts: { addr: selectedTarget, path: filePath, compress: appSettings.compress, bundle: appSettings.bundle, encrypted: appSettings.encrypted }
   }).then(realId => {
     console.log('[handleFilePath] send_files returned:', realId);
     if (realId) {
@@ -340,6 +366,7 @@ function setupGlobalListeners() {
       if (setting && setting in appSettings) {
         appSettings[setting] = toggle.classList.contains('on');
         if (canInvoke()) tauriInvoke('update_settings', { appSettings });
+        if (setting === 'encrypted') syncPasswordUI();
       }
       return;
     }
@@ -569,6 +596,14 @@ function syncPortInput() {
 function syncSpeedUnitUI() {
   const sel = document.getElementById('speed-unit-select');
   if (sel) sel.value = speedUnit;
+}
+
+function syncPasswordUI() {
+  const pwd = document.getElementById('encryption-password');
+  if (pwd) pwd.value = appSettings.password || '';
+  // Show/hide password row based on encrypted toggle
+  const row = document.getElementById('encryption-password-row');
+  if (row) row.style.display = appSettings.encrypted ? '' : 'none';
 }
 
 // ── Tauri Events ──

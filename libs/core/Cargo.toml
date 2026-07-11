@@ -14,6 +14,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
 lz4_flex = { version = "0.11", optional = true }
+aes-gcm = "0.10"
+sha2 = "0.10"
+rand = "0.8"
 
 [features]
 default = ["compress"]
