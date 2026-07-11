@@ -1,9 +1,6 @@
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener as TokioListener, TcpStream as TokioStream};
 
 /// Wrapper around a TCP listener.

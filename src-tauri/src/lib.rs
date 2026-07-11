@@ -225,36 +225,31 @@ async fn send_single(
 ) -> Result<String, String> {
     let addr: SocketAddr = opts.addr.parse().map_err(|e| format!("invalid addr: {e}"))?;
     let file_path = PathBuf::from(&opts.path);
-    let data = std::fs::read(&file_path).map_err(|e| format!("read: {e}"))?;
-    let file_size = data.len();
     let file_name = file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
+    let file_size = std::fs::metadata(&file_path)
+        .map(|m| m.len())
+        .map_err(|e| format!("stat: {e}"))?;
 
-    let (send_data, compressed) = if opts.compress {
-        let c = quickshare_core::compress::compress(&data);
-        let shrunk = c.len() < data.len();
-        (c, shrunk)
-    } else {
-        (data, false)
-    };
-
+    // Build FileMeta with estimate chunk_count (receiver never reads it)
     let meta = FileMeta {
         name: file_name.clone(),
-        size: file_size as u64,
+        size: file_size,
         chunk_size: CHUNK_SIZE,
-        chunk_count: (send_data.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
+        chunk_count: (file_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
-        compressed,
+        compressed: opts.compress,
         bundle: false,
+        stream: true,  // per-chunk independent compression
     };
 
     eprintln!("[send_single] file={file_name} size={file_size} addr={addr}");
 
     let tid = uuid::Uuid::new_v4().to_string();
-    register_transfer(&state, &tid, &file_name, file_size as u64).await;
+    register_transfer(&state, &tid, &file_name, file_size).await;
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
@@ -262,7 +257,7 @@ async fn send_single(
     let tid2 = tid.clone();
     tauri::async_runtime::spawn(async move {
         eprintln!("[send_single] {tid2}: connecting to {addr}...");
-        let r = do_send_file(addr, meta, &send_data, &app, &tid2, cancel).await;
+        let r = do_send_file_streaming(addr, meta, &file_path, &app, &tid2, cancel).await;
         eprintln!("[send_single] {tid2}: result={}", r.is_ok());
         finish_transfer(&app, &tid2, r).await;
     });
@@ -760,13 +755,13 @@ async fn handle_incoming(
         }
     }
 
-    send_json(
+    let _ = send_json(
         &mut stream,
         &ControlMessage::TransferAccept {
             transfer_id,
             received_chunks: vec![],
         },
-    ).await?;
+    ).await;
 
     // Receive chunks with progress tracking
     let mut receiver = FileReceiver::from_handshake(stream, meta.clone());
@@ -774,6 +769,17 @@ async fn handle_incoming(
     let mut tmp_guard = TempFileGuard::new(tmp.clone());
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut recvd = 0u64;
+
+    // For streaming compressed single-file transfers, decompress each chunk
+    // on the fly and write directly to the output file, avoiding a tmp file.
+    // The `stream` flag indicates per-chunk independent compression (new format).
+    let streaming = meta.compressed && !meta.bundle && meta.stream;
+    let mut out_file: Option<tokio::fs::File> = if streaming {
+        let out = save_dir.join(&meta.name);
+        Some(tokio::fs::File::create(&out).await?)
+    } else {
+        None
+    };
 
     loop {
         // Check if transfer was cancelled
@@ -788,8 +794,16 @@ async fn handle_incoming(
         .await;
         match chunk {
             Ok(Ok(Some((_, data)))) => {
-                file.write_all(&data).await?;
-                recvd += data.len() as u64;
+                if let Some(ref mut of) = out_file {
+                    // Streaming: decompress this chunk's data and write to output
+                    let decompressed = quickshare_core::compress::decompress(&data)
+                        .map_err(|e| anyhow::anyhow!("decompress chunk: {e}"))?;
+                    of.write_all(&decompressed).await?;
+                    recvd += decompressed.len() as u64;
+                } else {
+                    file.write_all(&data).await?;
+                    recvd += data.len() as u64;
+                }
                 // Emit receive progress so both sides see it
                 let _ = app.emit(
                     "transfer-progress",
@@ -801,7 +815,10 @@ async fn handle_incoming(
                     }),
                 );
             }
-            Ok(Ok(None)) => break,        // done marker or connection closed
+            Ok(Ok(None)) => {
+                eprintln!("[server] {tid_str}: recv_chunk returned None (done)");
+                break;
+            }
             Ok(Err(e)) => {
                 anyhow::bail!("接收块失败: {e}");
             }
@@ -810,53 +827,73 @@ async fn handle_incoming(
             }
         }
     }
-    drop(file);
 
-    // Check if cancelled while receiving — clean up tmp file and bail
-    if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
-        // tmp_guard drops here, cleaning up the temp file
-        finish_receive(app, &tid_str, &peer_str, &meta.name, recvd, false).await;
-        return Ok(());
+    // Flush and close files
+    if let Some(ref mut of) = out_file {
+        of.shutdown().await?;
     }
-
-    // Process received data (bundle or single file)
-    if meta.bundle {
-        let data = if meta.compressed {
-            let raw = std::fs::read(&tmp)?;
-            tmp_guard.disarm();
-            tokio::fs::remove_file(&tmp).await?;
-            quickshare_core::compress::decompress(&raw)?
-        } else {
-            let raw = std::fs::read(&tmp)?;
-            tmp_guard.disarm();
-            tokio::fs::remove_file(&tmp).await?;
-            raw
-        };
-        let root = save_dir.join(&meta.name);
-        tokio::fs::create_dir_all(&root).await?;
-        let files = quickshare_core::bundle::extract_bundle(&data)?;
-        let file_count = files.len();
-        let mut total = 0u64;
-        for (rel, fdata) in &files {
-            let full = root.join(rel);
-            if let Some(p) = full.parent() {
-                tokio::fs::create_dir_all(p).await?;
-            }
-            tokio::fs::write(&full, fdata).await?;
-            total += fdata.len() as u64;
-        }
-        // Update transfer entry and history
+    if streaming {
+        tmp_guard.disarm(); // no tmp file was created
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
             serde_json::json!({
                 "peer": peer_str,
-                "name": meta.name,
-                "count": file_count,
-                "total_bytes": total,
+                "file": meta.name,
+                "size": recvd,
             }),
         );
-    } else if meta.compressed {
+    } else {
+        file.shutdown().await?;
+        eprintln!("[server] {tid_str}: file closed, processing...");
+
+        // Check if cancelled while receiving
+        if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
+            finish_receive(app, &tid_str, &peer_str, &meta.name, recvd, false).await;
+            return Ok(());
+        }
+
+        // Process received data (bundle, compressed, or single file)
+        if meta.bundle {
+            let data = if meta.compressed {
+                let raw = std::fs::read(&tmp).map_err(|e| anyhow::anyhow!("read tmp for bundle: {e}"))?;
+                tmp_guard.disarm();
+                tokio::fs::remove_file(&tmp).await.map_err(|e| anyhow::anyhow!("remove tmp for bundle: {e}"))?;
+                quickshare_core::compress::decompress(&raw)?
+            } else {
+                let raw = std::fs::read(&tmp)?;
+                tmp_guard.disarm();
+                tokio::fs::remove_file(&tmp).await?;
+                raw
+            };
+            let root = save_dir.join(&meta.name);
+            tokio::fs::create_dir_all(&root).await?;
+            let files = quickshare_core::bundle::extract_bundle(&data)?;
+            let file_count = files.len();
+            let mut total = 0u64;
+            for (rel, fdata) in &files {
+                let full = root.join(rel);
+                if let Some(p) = full.parent() {
+                    tokio::fs::create_dir_all(p).await?;
+                }
+                tokio::fs::write(&full, fdata).await?;
+                total += fdata.len() as u64;
+            }
+            // Update transfer entry and history
+            finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
+            let _ = app.emit(
+                "receive-complete",
+                serde_json::json!({
+                    "peer": peer_str,
+                    "name": meta.name,
+                    "count": file_count,
+                    "total_bytes": total,
+                }),
+            );
+        } else if meta.compressed {
+        // Backward compatibility: old senders compress the whole file as one
+        // blob (no `stream` flag).  The tmp file holds the complete compressed
+        // data — decompress it all at once.
         let raw = std::fs::read(&tmp)?;
         tmp_guard.disarm();
         tokio::fs::remove_file(&tmp).await?;
@@ -872,10 +909,10 @@ async fn handle_incoming(
                 "size": recvd,
             }),
         );
-    } else {
+        } else {
         let out = save_dir.join(&meta.name);
         tmp_guard.disarm();
-        tokio::fs::rename(&tmp, &out).await?;
+        tokio::fs::rename(&tmp, &out).await.map_err(|e| anyhow::anyhow!("rename tmp: {e}"))?;
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
@@ -885,9 +922,9 @@ async fn handle_incoming(
                 "size": recvd,
             }),
         );
-    }
-
-    Ok(())
+        }
+        }
+        Ok(())
 }
 
 // ── Internal ──
@@ -953,6 +990,89 @@ async fn do_send_file(
     Ok(())
 }
 
+/// Streaming variant: connect and handshake first, then read file in chunks,
+/// compress each chunk independently, and send.  Never loads the whole file
+/// into memory.
+async fn do_send_file_streaming(
+    addr: SocketAddr,
+    meta: FileMeta,
+    file_path: &PathBuf,
+    app: &AppHandle,
+    tid: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| format!("连接超时: {addr}"))?
+    .map_err(|e| format!("连接失败: {e}"))?;
+
+    let mut sender = FileSender::new(stream, meta.clone());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sender.handshake(),
+    )
+    .await
+    .map_err(|_| "握手超时: 对方未响应".to_string())?
+    .map_err(|e| format!("握手失败: {e}"))?;
+
+    match &response {
+        ControlMessage::TransferReject { reason, .. } => {
+            return Err(format!("对方拒绝了传输: {reason}"));
+        }
+        _ => {}
+    }
+
+    // Open the file and stream chunks from disk
+    let file = std::fs::File::open(file_path).map_err(|e| format!("open: {e}"))?;
+    let reader = ChunkReader::new(file, CHUNK_SIZE);
+    let mut sent = 0u64;
+
+    for chunk in reader {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
+        let c = chunk.map_err(|e| format!("chunk: {e}"))?;
+        let chunk_len = c.data.len() as u64;
+
+        // Compress each chunk independently if compression is enabled
+        let (send_data, chunk_hash) = if meta.compressed {
+            let compressed = quickshare_core::compress::compress(&c.data);
+            let hash = *blake3::hash(&compressed).as_bytes();
+            (compressed, hash)
+        } else {
+            (c.data, c.hash)
+        };
+
+        let wire_chunk = quickshare_core::transfer::chunk::Chunk {
+            index: c.index,
+            offset: c.offset,
+            data: send_data,
+            hash: chunk_hash,
+        };
+
+        sender
+            .send_chunk(&wire_chunk)
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+
+        // Track progress based on original (uncompressed) bytes
+        sent += chunk_len;
+        let _ = app.emit(
+            "transfer-progress",
+            serde_json::json!({ "id": tid, "sent": sent, "total": meta.size }),
+        );
+    }
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+    sender.finish().await.map_err(|e| format!("finish: {e}"))?;
+    Ok(())
+}
+
 async fn do_send_bundle(
     addr: SocketAddr,
     dir_path: PathBuf,
@@ -984,6 +1104,7 @@ async fn do_send_bundle(
         file_hash: [0u8; 32],
         compressed: compressed.len() < bundle.len(),
         bundle: true,
+        stream: false,
     };
 
     do_send_file(addr, file_meta, &compressed, app, tid, cancel).await

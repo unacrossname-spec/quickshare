@@ -61,9 +61,10 @@ impl FileReceiver {
         let mut hdr = [0u8; HDR_SIZE];
         match self.stream.read_exact(&mut hdr).await {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
-            Err(e) => anyhow::bail!(e),
+            Err(e) => {
+                eprintln!("[recv_chunk] header read error: kind={:?} msg={}", e.kind(), e);
+                return Ok(None);
+            }
         }
 
         let (ty, index, offset, size, hash) = parse_header(&hdr);
@@ -75,7 +76,13 @@ impl FileReceiver {
         }
 
         let mut data = vec![0u8; size as usize];
-        self.stream.read_exact(&mut data).await?;
+        match self.stream.read_exact(&mut data).await {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[recv_chunk] data read error: kind={:?} msg={}", e.kind(), e);
+                return Ok(None);
+            }
+        }
         self.bytes_received += size as u64;
 
         // Verify chunk integrity

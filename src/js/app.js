@@ -599,7 +599,11 @@ function setupTauriEvents() {
     if (currentPage === 'transfers') updateTransferUI();
   });
   l('transfer-complete', async () => {
+    // Preserve direction from local array before re-fetching
+    const oldDirs = {};
+    transfers.forEach(t => { if (t.direction) oldDirs[t.id] = t.direction; });
     try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
+    transfers.forEach(t => { if (oldDirs[t.id]) t.direction = oldDirs[t.id]; });
     try { history = await tauriInvoke('get_history') || []; } catch {}
     // Clean up speed tracking for completed transfers
     const activeIds = new Set(transfers.map(t => t.id));
@@ -607,7 +611,10 @@ function setupTauriEvents() {
     if (currentPage === 'transfers') updateTransferUI();
   });
   l('receive-complete', async () => {
+    const oldDirs = {};
+    transfers.forEach(t => { if (t.direction) oldDirs[t.id] = t.direction; });
     try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
+    transfers.forEach(t => { if (oldDirs[t.id]) t.direction = oldDirs[t.id]; });
     try { history = await tauriInvoke('get_history') || []; } catch {}
     const activeIds = new Set(transfers.map(t => t.id));
     Object.keys(transferSpeeds).forEach(id => { if (!activeIds.has(id)) delete transferSpeeds[id]; });
@@ -719,12 +726,17 @@ async function respondTransfer(requestId, accept) {
   }
   try {
     await tauriInvoke('respond_transfer', { requestId, accept });
+    // Update local transfer status instead of re-fetching from backend
+    // (backend TransferState has no direction field, so re-fetch would lose it)
+    const t = transfers.find(x => x.id === requestId);
+    if (t) {
+      t.status = accept ? 'active' : 'cancelled';
+      t.sent = 0;
+    }
+    updateTransferUI();
   } catch (e) {
     console.error('respond_transfer:', e);
   }
-  // Refresh transfers from backend
-  try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
-  updateTransferUI();
 }
 
 // ── Settings ──

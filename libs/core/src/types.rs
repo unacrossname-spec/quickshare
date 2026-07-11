@@ -41,6 +41,10 @@ pub struct FileMeta {
     pub compressed: bool,
     #[serde(default)]
     pub bundle: bool,
+    /// Each chunk is independently compressed (enables streaming).
+    /// When false (default), the entire file was compressed as one blob.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
