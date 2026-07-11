@@ -154,6 +154,7 @@ async fn send_files(
     state: tauri::State<'_, AppState>,
     opts: SendOptions,
 ) -> Result<String, String> {
+    eprintln!("[send_files] addr={} path={} compress={} bundle={}", opts.addr, opts.path, opts.compress, opts.bundle);
     let path = PathBuf::from(&opts.path);
     if path.is_dir() {
         send_directory(app, state, opts).await
@@ -195,6 +196,8 @@ async fn send_single(
         bundle: false,
     };
 
+    eprintln!("[send_single] file={file_name} size={file_size} addr={addr}");
+
     let tid = uuid::Uuid::new_v4().to_string();
     register_transfer(&state, &tid, &file_name, file_size as u64).await;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -203,7 +206,9 @@ async fn send_single(
 
     let tid2 = tid.clone();
     tauri::async_runtime::spawn(async move {
+        eprintln!("[send_single] {tid2}: connecting to {addr}...");
         let r = do_send_file(addr, meta, &send_data, &app, &tid2, cancel).await;
+        eprintln!("[send_single] {tid2}: result={}", r.is_ok());
         finish_transfer(&app, &tid2, r).await;
     });
 
@@ -624,6 +629,7 @@ async fn handle_incoming(
     app: &AppHandle,
     peer: SocketAddr,
 ) -> Result<(), anyhow::Error> {
+    eprintln!("[server] new connection from {peer}");
     let first: serde_json::Value = recv_json(&mut stream).await?;
     let req: ControlMessage = serde_json::from_value(first)?;
     let (transfer_id, meta) = match &req {
@@ -633,6 +639,7 @@ async fn handle_incoming(
 
     let tid_str = transfer_id.to_string();
     let peer_str = peer.to_string();
+    eprintln!("[server] TransferRequest from {peer_str}: file={} size={}", meta.name, meta.size);
 
     // Register as incoming transfer so it shows in the UI immediately
     let state = app.state::<AppState>();
@@ -650,6 +657,7 @@ async fn handle_incoming(
     drop(state);
 
     // Ask the frontend user for confirmation
+    eprintln!("[server] {tid_str}: emitting incoming-transfer event");
     let _ = app.emit("incoming-transfer", serde_json::json!({
         "request_id": tid_str,
         "peer": peer_str,
@@ -658,7 +666,9 @@ async fn handle_incoming(
     }));
 
     // Wait for user response (accept/decline)
+    eprintln!("[server] {tid_str}: waiting for user confirmation...");
     let accepted = rx.await.unwrap_or(false);
+    eprintln!("[server] {tid_str}: user responded accepted={accepted}");
     app.state::<AppState>().pending_requests.lock().await.remove(&tid_str);
 
     if !accepted {
@@ -795,14 +805,33 @@ async fn do_send_file(
     tid: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    // Timeout for TCP connect (10s). A hung connect is worse than a fast failure.
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| format!("连接超时: {addr}"))?
+    .map_err(|e| format!("连接失败: {e}"))?;
+
     let mut sender = FileSender::new(stream, meta);
-    sender
-        .handshake()
-        .await
-        .map_err(|e| format!("handshake: {e}"))?;
+    // Handshake sends TransferRequest and waits for the receiver's response.
+    // This may take a while because the receiver shows a confirmation dialog.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sender.handshake(),
+    )
+    .await
+    .map_err(|_| "握手超时: 对方未响应".to_string())?
+    .map_err(|e| format!("握手失败: {e}"))?;
+
+    // Check if accepted
+    match &response {
+        ControlMessage::TransferReject { reason, .. } => {
+            return Err(format!("对方拒绝了传输: {reason}"));
+        }
+        _ => {}
+    }
 
     let total = data.len() as u64;
     let reader = ChunkReader::new(data, CHUNK_SIZE);
@@ -885,14 +914,21 @@ async fn do_send_batch(
         root_name: root.to_string(),
     };
 
-    let stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| format!("连接超时: {addr}"))?
+    .map_err(|e| format!("连接失败: {e}"))?;
     let mut sender = BatchSender::new(stream, meta, CHUNK_SIZE).with_compression(compress);
-    sender
-        .handshake()
-        .await
-        .map_err(|e| format!("handshake: {e}"))?;
+    let _response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sender.handshake(),
+    )
+    .await
+    .map_err(|_| "握手超时: 对方未响应".to_string())?
+    .map_err(|e| format!("握手失败: {e}"))?;
 
     let mut sent = 0u64;
     for (rel, _) in files {

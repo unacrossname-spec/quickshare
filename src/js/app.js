@@ -32,7 +32,10 @@ let appSettings = {
 };
 
 // ── Init ──
+// IMPORTANT: Register event listeners BEFORE any async init to avoid
+// missing events (e.g., incoming-transfer) that arrive during startup.
 document.addEventListener('DOMContentLoaded', async () => {
+  setupTauriEvents();
   setupGlobalListeners();
   setupDropZone();
 
@@ -262,6 +265,8 @@ function handleFilePick(input) {
 }
 
 function handleFilePath(filePath, fileSize, fileName) {
+  console.log('[handleFilePath] path:', filePath, 'size:', fileSize, 'target:', selectedTarget);
+
   if (!selectedTarget) {
     const ip = prompt('请输入目标设备 IP:port\n例如 192.168.1.100:8877');
     if (!ip) return;
@@ -278,10 +283,11 @@ function handleFilePath(filePath, fileSize, fileName) {
   const tempId = transfers[transfers.length - 1].id;
   switchPage('transfers');
 
+  console.log('[handleFilePath] invoking send_files...');
   tauriInvoke('send_files', {
     opts: { addr: selectedTarget, path: filePath, compress: appSettings.compress, bundle: appSettings.bundle }
   }).then(realId => {
-    // Replace temp ID with backend-generated UUID so progress events match
+    console.log('[handleFilePath] send_files returned:', realId);
     if (realId) {
       const t = transfers.find(x => x.id === tempId);
       if (t) t.id = realId;
