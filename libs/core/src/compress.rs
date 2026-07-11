@@ -14,9 +14,23 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Always compress, even if the output doesn't shrink.
+/// Used for per-chunk streaming compression where the receiver expects
+/// valid LZ4 frames for every chunk.
+#[cfg(feature = "compress")]
+pub fn compress_always(data: &[u8]) -> Vec<u8> {
+    lz4_flex::compress_prepend_size(data)
+}
+
 /// No-op compression when feature is disabled.
 #[cfg(not(feature = "compress"))]
 pub fn compress(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
+}
+
+/// No-op when feature is disabled.
+#[cfg(not(feature = "compress"))]
+pub fn compress_always(data: &[u8]) -> Vec<u8> {
     data.to_vec()
 }
 

@@ -1037,9 +1037,10 @@ async fn do_send_file_streaming(
         let c = chunk.map_err(|e| format!("chunk: {e}"))?;
         let chunk_len = c.data.len() as u64;
 
-        // Compress each chunk independently if compression is enabled
+        // Compress each chunk independently if compression is enabled.
+        // Always produce a valid LZ4 frame so the receiver can decompress it.
         let (send_data, chunk_hash) = if meta.compressed {
-            let compressed = quickshare_core::compress::compress(&c.data);
+            let compressed = quickshare_core::compress::compress_always(&c.data);
             let hash = *blake3::hash(&compressed).as_bytes();
             (compressed, hash)
         } else {
