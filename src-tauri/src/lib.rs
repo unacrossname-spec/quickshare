@@ -1261,9 +1261,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 run_discovery(disc_handle).await;
             });
-            tauri::async_runtime::spawn(async move {
-                run_periodic_scan(scan_handle).await;
-            });
+            // Periodic scan disabled — user clicks 刷新 button to scan manually.
+            // tauri::async_runtime::spawn(async move {
+            //     run_periodic_scan(scan_handle).await;
+            // });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

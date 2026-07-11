@@ -11,9 +11,14 @@ function tauriInvoke(cmd, args) {
 function tauriListen(evt, cb) {
   const internals = window.__TAURI_INTERNALS__;
   if (!internals) return;
-  // Tauri events: invoke 'plugin:event|listen' with a transformed callback
   const handler = internals.transformCallback(cb, false);
-  return internals.invoke('plugin:event|listen', { event: evt, handler });
+  // IMPORTANT: EventTarget requires { kind: 'Any' } (serde tag format).
+  // Without the target parameter, plugin:event|listen silently fails.
+  return internals.invoke('plugin:event|listen', {
+    event: evt,
+    target: { kind: 'Any' },
+    handler,
+  }).catch(e => console.error('[tauriListen] failed:', evt, e));
 }
 function canInvoke() { return !!window.__TAURI_INTERNALS__?.invoke; }
 
