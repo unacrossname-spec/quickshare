@@ -101,10 +101,27 @@ pub struct PickedFile {
 
 // ── Persistence ──
 
-fn state_path() -> PathBuf {
-    let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    p.push("quickshare_state.json");
+fn default_save_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let downloads = home.join("Downloads");
+    if downloads.exists() { downloads } else { home }
+}
+
+fn data_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let p = home.join(".local").join("share").join("quickshare");
+    let _ = std::fs::create_dir_all(&p);
     p
+}
+
+fn state_path() -> PathBuf {
+    data_dir().join("quickshare_state.json")
 }
 
 fn load_state_file() -> (Vec<HistoryRecord>, AppSettings) {
@@ -708,7 +725,14 @@ async fn handle_incoming(
     let mut recvd = 0u64;
 
     loop {
-        match receiver.recv_chunk().await? {
+        let chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            receiver.recv_chunk(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("接收数据超时: 30秒未收到数据"))?
+        .map_err(|e| anyhow::anyhow!("接收块失败: {e}"))?;
+        match chunk {
             Some((_, data)) => {
                 file.write_all(&data).await?;
                 recvd += data.len() as u64;
@@ -1184,9 +1208,7 @@ pub fn run() {
 
     let state = AppState {
         server_shutdown: Arc::new(AtomicBool::new(false)),
-        save_dir: Arc::new(Mutex::new(
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        )),
+        save_dir: Arc::new(Mutex::new(default_save_dir())),
         transfers: Arc::new(Mutex::new(Vec::new())),
         history: Arc::new(Mutex::new(saved_history)),
         cancel_flags: Arc::new(Mutex::new(HashMap::new())),

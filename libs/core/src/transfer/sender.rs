@@ -70,10 +70,12 @@ impl FileSender {
         Ok(())
     }
 
-    /// Signal transfer complete (binary done marker).
+    /// Signal transfer complete (binary done marker) and shut down the write side
+    /// so the receiver sees a proper EOF instead of a TCP RST.
     pub async fn finish(&mut self) -> Result<()> {
         let hdr = pack_header(DONE_TYPE, 0, 0, 0, &[0u8; 32]);
         self.stream.write_all(&hdr).await?;
+        self.stream.shutdown().await?;
         Ok(())
     }
 
