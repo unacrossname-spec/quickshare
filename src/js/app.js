@@ -369,12 +369,15 @@ function setupGlobalListeners() {
       if (setting && setting in appSettings) {
         appSettings[setting] = toggle.classList.contains('on');
         if (canInvoke()) {
-          // Defer IPC to next macrotask so CSS transition + render can
-          // complete first — avoids a WebKitGTK compositor freeze when
-          // the toggle pseudo-element animation is still running.
-          setTimeout(() => {
-            tauriInvoke('update_settings', { appSettings }).catch(() => {});
-          }, 0);
+          const save = () => tauriInvoke('update_settings', { appSettings }).catch(() => {});
+          // Wait for CSS transition to finish before IPC so WebKitGTK
+          // compositor isn't interrupted mid-animation.
+          const dur = getComputedStyle(toggle).transitionDuration;
+          if (dur && dur !== '0s') {
+            toggle.addEventListener('transitionend', save, { once: true });
+          } else {
+            save();
+          }
         }
       }
       return;

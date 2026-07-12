@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,9 @@ pub struct AppState {
     /// Pending incoming transfer requests waiting for user confirmation.
     /// Maps transfer_id → oneshot sender<bool> (true = accepted, false = declined).
     pub pending_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+    /// Generation counter for debounced saves — each update_settings call
+    /// increments it; only the latest generation writes to disk.
+    pub save_gen: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -439,7 +442,17 @@ async fn update_settings(
     if let Some(s) = app_settings {
         let hist = state.history.lock().await.clone();
         *state.settings.lock().await = s.clone();
-        save_state_file(&hist, &s);
+
+        // Debounce: only the most recent generation writes to disk.
+        // Rapid successive calls to update_settings skip intermediate writes.
+        let gen = state.save_gen.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+        let save_gen = Arc::clone(&state.save_gen);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if save_gen.load(Ordering::SeqCst) == gen {
+                save_state_file(&hist, &s);
+            }
+        });
     }
     Ok(())
 }
@@ -1474,6 +1487,7 @@ pub fn run() {
         settings: Arc::new(Mutex::new(saved_settings)),
         discovery_running: Arc::new(AtomicBool::new(false)),
         pending_requests: Arc::new(Mutex::new(HashMap::new())),
+        save_gen: Arc::new(AtomicU64::new(0)),
     };
 
     tauri::Builder::default()
