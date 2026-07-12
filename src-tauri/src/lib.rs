@@ -873,23 +873,25 @@ async fn handle_incoming(
                 if let Some(ref mut of) = out_file {
                     // Streaming: decrypt (if enabled), decompress, write
                     let decrypted = if let Some(ref key) = dec_key {
-                        quickshare_core::crypto::decrypt(key, &data)
-                            .map_err(|_| {
-    let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
-    let _ = app.emit("receive-complete", serde_json::json!({
-        "peer": peer_str,
-        "file": meta.name,
-        "size": recvd,
-        "success": false,
-        "error": &msg,
-    }));
-    if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
-        st.status = "failed".to_string();
-        st.sent = recvd;
-        st.total = meta.size;
-    }
-    anyhow::anyhow!(msg)
-})?
+                        match quickshare_core::crypto::decrypt(key, &data) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
+                                let _ = app.emit("receive-complete", serde_json::json!({
+                                    "peer": peer_str,
+                                    "file": meta.name,
+                                    "size": recvd,
+                                    "success": false,
+                                    "error": &msg,
+                                }));
+                                if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
+                                    st.status = "failed".to_string();
+                                    st.sent = recvd;
+                                    st.total = meta.size;
+                                }
+                                anyhow::bail!(msg);
+                            }
+                        }
                     } else {
                         data
                     };
@@ -977,8 +979,9 @@ async fn handle_incoming(
             // Decrypt if sender used encryption
             if meta.encrypted {
                 let key = dec_key.as_ref().ok_or_else(|| anyhow::anyhow!("encrypted bundle but no local password set"))?;
-                data = quickshare_core::crypto::decrypt(key, &data)
-                    .map_err(|_| {
+                data = match quickshare_core::crypto::decrypt(key, &data) {
+                    Ok(d) => d,
+                    Err(_) => {
                         let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                         let _ = app.emit("receive-complete", serde_json::json!({
                             "peer": peer_str, "name": meta.name, "count": 0, "total_bytes": 0, "success": false, "error": &msg,
@@ -986,8 +989,9 @@ async fn handle_incoming(
                         if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
                             st.status = "failed".to_string();
                         }
-                        anyhow::anyhow!(msg)
-                    })?;
+                        anyhow::bail!(msg);
+                    }
+                };
             }
             let root = save_dir.join(&meta.name);
             tokio::fs::create_dir_all(&root).await?;
@@ -1024,8 +1028,9 @@ async fn handle_incoming(
         // Decrypt if sender used encryption
         if meta.encrypted {
             let key = dec_key.as_ref().ok_or_else(|| anyhow::anyhow!("encrypted file but no local password set"))?;
-            data = quickshare_core::crypto::decrypt(key, &data)
-                .map_err(|_| {
+            data = match quickshare_core::crypto::decrypt(key, &data) {
+                Ok(d) => d,
+                Err(_) => {
                     let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                     let _ = app.emit("receive-complete", serde_json::json!({
                         "peer": peer_str, "file": meta.name, "size": recvd, "success": false, "error": &msg,
@@ -1033,8 +1038,9 @@ async fn handle_incoming(
                     if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
                         st.status = "failed".to_string();
                     }
-                    anyhow::anyhow!(msg)
-                })?;
+                    anyhow::bail!(msg);
+                }
+            };
         }
         let out = save_dir.join(&meta.name);
         tokio::fs::write(&out, &data).await?;
@@ -1055,8 +1061,9 @@ async fn handle_incoming(
             let raw = std::fs::read(&tmp).map_err(|e| anyhow::anyhow!("read tmp for decrypt: {e}"))?;
             tmp_guard.disarm();
             tokio::fs::remove_file(&tmp).await?;
-            let decrypted = quickshare_core::crypto::decrypt(key, &raw)
-                .map_err(|_| {
+            let decrypted = match quickshare_core::crypto::decrypt(key, &raw) {
+                Ok(d) => d,
+                Err(_) => {
                     let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                     let _ = app.emit("receive-complete", serde_json::json!({
                         "peer": peer_str, "file": meta.name, "size": recvd, "success": false, "error": &msg,
@@ -1064,8 +1071,9 @@ async fn handle_incoming(
                     if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
                         st.status = "failed".to_string();
                     }
-                    anyhow::anyhow!(msg)
-                })?;
+                    anyhow::bail!(msg);
+                }
+            };
             tokio::fs::write(&out, &decrypted).await?;
         } else {
             tmp_guard.disarm();
