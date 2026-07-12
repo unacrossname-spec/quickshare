@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use quickshare_core::transfer::batch::{self, BatchMeta, BatchSender};
+use quickshare_core::transfer::batch::{self, BatchMeta, BatchReceiver, BatchSender};
 use quickshare_core::transfer::chunk::ChunkReader;
 use quickshare_core::transfer::receiver::FileReceiver;
 use quickshare_core::transfer::sender::{recv_json, send_json, FileSender};
@@ -39,6 +39,47 @@ impl Drop for TempFileGuard {
         if let Some(p) = self.path.take() {
             let _ = std::fs::remove_file(&p);
         }
+    }
+}
+
+fn safe_file_name(name: &str) -> Result<String, anyhow::Error> {
+    let path = Path::new(name);
+    match (path.components().next(), path.components().nth(1)) {
+        (Some(Component::Normal(component)), None) => component
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("file name is not valid UTF-8")),
+        _ => anyhow::bail!("unsafe file name: {name}"),
+    }
+}
+
+fn safe_relative_path(root: &Path, relative: &str) -> Result<PathBuf, anyhow::Error> {
+    let path = Path::new(relative);
+    if path.as_os_str().is_empty() || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        anyhow::bail!("unsafe relative path: {relative}");
+    }
+    Ok(root.join(path))
+}
+
+fn verify_file_hash(expected: &[u8; 32], data: &[u8]) -> Result<(), anyhow::Error> {
+    if *expected != [0; 32] && *blake3::hash(data).as_bytes() != *expected {
+        anyhow::bail!("full-file hash mismatch");
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<[u8; 32], anyhow::Error> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(*hasher.finalize().as_bytes());
+        }
+        hasher.update(&buffer[..read]);
     }
 }
 
@@ -251,11 +292,12 @@ async fn send_single(
         size: file_size,
         chunk_size: CHUNK_SIZE,
         chunk_count: (file_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64,
-        file_hash: [0u8; 32],
+        file_hash: hash_file(&file_path).map_err(|e| format!("hash: {e}"))?,
         compressed: opts.compress,
         bundle: false,
         stream: true,  // per-chunk independent compression
         encrypted: opts.encrypted,
+        kdf_salt: if opts.encrypted { *uuid::Uuid::new_v4().as_bytes() } else { [0; 16] },
     };
 
     eprintln!("[send_single] file={file_name} size={file_size} addr={addr}");
@@ -741,11 +783,16 @@ async fn handle_incoming(
 ) -> Result<(), anyhow::Error> {
     eprintln!("[server] new connection from {peer}");
     let first: serde_json::Value = recv_json(&mut stream).await?;
+    if first.get("total_files").is_some() {
+        return handle_incoming_batch(stream, first, save_dir, app, peer).await;
+    }
     let req: ControlMessage = serde_json::from_value(first)?;
-    let (transfer_id, meta) = match &req {
+    let (transfer_id, mut meta) = match &req {
         ControlMessage::TransferRequest { transfer_id, file_meta } => (*transfer_id, file_meta.clone()),
         _ => anyhow::bail!("expected TransferRequest"),
     };
+
+    meta.name = safe_file_name(&meta.name)?;
 
     let tid_str = transfer_id.to_string();
     let peer_str = peer.to_string();
@@ -845,7 +892,7 @@ async fn handle_incoming(
     // Derive decryption key from the configured password (if transfer is encrypted)
     let dec_key = if meta.encrypted {
         let pwd = app.state::<AppState>().settings.lock().await.password.clone();
-        Some(quickshare_core::crypto::derive_key(&pwd))
+        Some(quickshare_core::crypto::derive_key(&pwd, &meta.kdf_salt))
     } else {
         None
     };
@@ -876,6 +923,7 @@ async fn handle_incoming(
                         match quickshare_core::crypto::decrypt(key, &data) {
                             Ok(d) => d,
                             Err(_) => {
+                                eprintln!("[decrypt-fail] {tid_str}: password mismatch detected");
                                 let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                                 let _ = app.emit("receive-complete", serde_json::json!({
                                     "peer": peer_str,
@@ -938,7 +986,12 @@ async fn handle_incoming(
     if streaming {
         // Store file hash in transfer state
         if let Some(h) = file_hasher {
-            let hash_hex = h.finalize().to_hex().to_string();
+            let hash = h.finalize();
+            if meta.file_hash != [0; 32] && hash.as_bytes() != &meta.file_hash {
+                let _ = tokio::fs::remove_file(save_dir.join(&meta.name)).await;
+                anyhow::bail!("full-file hash mismatch");
+            }
+            let hash_hex = hash.to_hex().to_string();
             if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
                 st.file_hash = hash_hex;
             }
@@ -982,6 +1035,7 @@ async fn handle_incoming(
                 data = match quickshare_core::crypto::decrypt(key, &data) {
                     Ok(d) => d,
                     Err(_) => {
+                        eprintln!("[decrypt-fail] {tid_str}: password mismatch detected");
                         let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                         let _ = app.emit("receive-complete", serde_json::json!({
                             "peer": peer_str, "name": meta.name, "count": 0, "total_bytes": 0, "success": false, "error": &msg,
@@ -993,13 +1047,14 @@ async fn handle_incoming(
                     }
                 };
             }
+            verify_file_hash(&meta.file_hash, &data)?;
             let root = save_dir.join(&meta.name);
             tokio::fs::create_dir_all(&root).await?;
             let files = quickshare_core::bundle::extract_bundle(&data)?;
             let file_count = files.len();
             let mut total = 0u64;
             for (rel, fdata) in &files {
-                let full = root.join(rel);
+                let full = safe_relative_path(&root, rel)?;
                 if let Some(p) = full.parent() {
                     tokio::fs::create_dir_all(p).await?;
                 }
@@ -1031,6 +1086,7 @@ async fn handle_incoming(
             data = match quickshare_core::crypto::decrypt(key, &data) {
                 Ok(d) => d,
                 Err(_) => {
+                    eprintln!("[decrypt-fail] {tid_str}: password mismatch detected");
                     let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                     let _ = app.emit("receive-complete", serde_json::json!({
                         "peer": peer_str, "file": meta.name, "size": recvd, "success": false, "error": &msg,
@@ -1042,6 +1098,7 @@ async fn handle_incoming(
                 }
             };
         }
+        verify_file_hash(&meta.file_hash, &data)?;
         let out = save_dir.join(&meta.name);
         tokio::fs::write(&out, &data).await?;
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
@@ -1064,6 +1121,7 @@ async fn handle_incoming(
             let decrypted = match quickshare_core::crypto::decrypt(key, &raw) {
                 Ok(d) => d,
                 Err(_) => {
+                    eprintln!("[decrypt-fail] {tid_str}: password mismatch detected");
                     let msg = "密码错误，解密失败。请检查两端加密密码是否一致".to_string();
                     let _ = app.emit("receive-complete", serde_json::json!({
                         "peer": peer_str, "file": meta.name, "size": recvd, "success": false, "error": &msg,
@@ -1074,8 +1132,11 @@ async fn handle_incoming(
                     anyhow::bail!(msg);
                 }
             };
+            verify_file_hash(&meta.file_hash, &decrypted)?;
             tokio::fs::write(&out, &decrypted).await?;
         } else {
+            let raw = std::fs::read(&tmp)?;
+            verify_file_hash(&meta.file_hash, &raw)?;
             tmp_guard.disarm();
             tokio::fs::rename(&tmp, &out).await.map_err(|e| anyhow::anyhow!("rename tmp: {e}"))?;
         }
@@ -1091,6 +1152,70 @@ async fn handle_incoming(
         }
         }
         Ok(())
+}
+
+async fn handle_incoming_batch(
+    mut stream: TcpStream,
+    first: serde_json::Value,
+    save_dir: PathBuf,
+    app: &AppHandle,
+    peer: SocketAddr,
+) -> Result<(), anyhow::Error> {
+    let meta: BatchMeta = serde_json::from_value(first)?;
+    let root_name = safe_file_name(&meta.root_name)?;
+    let tid = uuid::Uuid::new_v4().to_string();
+    let peer_str = peer.to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.state::<AppState>().pending_requests.lock().await.insert(tid.clone(), tx);
+    app.state::<AppState>().transfers.lock().await.push(TransferState {
+        id: tid.clone(), file_name: format!("来自 {}: {} ({} files)", peer_str, root_name, meta.total_files),
+        total: meta.total_size, sent: 0, status: "pending".into(), started_at: 0, file_hash: String::new(),
+    });
+    let _ = app.emit("incoming-transfer", serde_json::json!({
+        "request_id": &tid, "peer": &peer_str, "file_name": &root_name, "file_size": meta.total_size,
+    }));
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
+        .await.ok().and_then(|r| r.ok()).unwrap_or(false);
+    app.state::<AppState>().pending_requests.lock().await.remove(&tid);
+    if !accepted {
+        send_json(&mut stream, &batch::Ack { ok: false }).await?;
+        app.state::<AppState>().transfers.lock().await.retain(|t| t.id != tid);
+        return Ok(());
+    }
+    send_json(&mut stream, &batch::Ack { ok: true }).await?;
+    if let Some(t) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid) {
+        t.status = "active".into();
+        t.started_at = chrono_now_ms();
+    }
+
+    let root = save_dir.join(&root_name);
+    let key = if meta.encrypted {
+        Some(quickshare_core::crypto::derive_key(
+            &app.state::<AppState>().settings.lock().await.password,
+            &meta.kdf_salt,
+        ))
+    } else {
+        None
+    };
+    let mut receiver = BatchReceiver { stream, meta: Some(meta), bytes_received: 0 };
+    let mut received = 0_u64;
+    while let Some((relative, mut data)) = receiver.recv_file().await? {
+        if let Some(ref key) = key {
+            data = quickshare_core::crypto::decrypt(key, &data)?;
+        }
+        let path = safe_relative_path(&root, &relative)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, &data).await?;
+        received += data.len() as u64;
+        let _ = app.emit("transfer-progress", serde_json::json!({
+            "id": &tid, "sent": received, "total": receiver.meta.as_ref().map_or(received, |m| m.total_size), "direction": "received",
+        }));
+    }
+    finish_receive(app, &tid, &peer.to_string(), &root_name, received, true).await;
+    let _ = app.emit("receive-complete", serde_json::json!({ "peer": peer.to_string(), "file": root_name, "size": received }));
+    Ok(())
 }
 
 // ── Internal ──
@@ -1199,7 +1324,7 @@ async fn do_send_file_streaming(
 
     // Derive encryption key from password (if encryption is enabled)
     let enc_key = if meta.encrypted {
-        Some(quickshare_core::crypto::derive_key(password))
+        Some(quickshare_core::crypto::derive_key(password, &meta.kdf_salt))
     } else {
         None
     };
@@ -1289,9 +1414,11 @@ async fn do_send_bundle(
     let is_compressed = compressed.len() < bundle.len();
 
     // Apply encryption after compression (or on raw bundle if not compressed)
+    let bundle_hash = *blake3::hash(&bundle).as_bytes();
+    let kdf_salt = if encrypted { *uuid::Uuid::new_v4().as_bytes() } else { [0; 16] };
     let mut payload = if is_compressed { compressed } else { bundle };
     if encrypted {
-        let key = quickshare_core::crypto::derive_key(password);
+        let key = quickshare_core::crypto::derive_key(password, &kdf_salt);
         payload = quickshare_core::crypto::encrypt(&key, &payload);
     }
 
@@ -1300,11 +1427,12 @@ async fn do_send_bundle(
         size: bundle_size,
         chunk_size: CHUNK_SIZE,
         chunk_count: (payload.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
-        file_hash: [0u8; 32],
+        file_hash: bundle_hash,
         compressed: is_compressed,
         bundle: true,
         stream: false,
         encrypted,
+        kdf_salt,
     };
 
     do_send_file(addr, file_meta, &payload, app, tid, cancel).await
@@ -1326,10 +1454,13 @@ async fn do_send_batch(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
+    let kdf_salt = if encrypted { *uuid::Uuid::new_v4().as_bytes() } else { [0; 16] };
     let meta = BatchMeta {
         total_files: files.len() as u32,
         total_size: total,
         root_name: root.to_string(),
+        encrypted,
+        kdf_salt,
     };
 
     let stream = tokio::time::timeout(
@@ -1356,7 +1487,7 @@ async fn do_send_batch(
         let full = dir_path.join(&rel);
         let mut data = std::fs::read(&full).map_err(|e| format!("read: {e}"))?;
         if encrypted {
-            let key = quickshare_core::crypto::derive_key(password);
+            let key = quickshare_core::crypto::derive_key(password, &kdf_salt);
             data = quickshare_core::crypto::encrypt(&key, &data);
         }
         sender

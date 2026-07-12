@@ -49,6 +49,10 @@ pub struct FileMeta {
     /// The encryption key is derived from a pre-shared password (never transmitted).
     #[serde(default)]
     pub encrypted: bool,
+    /// Random salt for password key derivation. An all-zero value denotes the
+    /// legacy SHA-256 derivation used by pre-0.4.3 peers.
+    #[serde(default)]
+    pub kdf_salt: [u8; 16],
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

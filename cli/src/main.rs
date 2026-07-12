@@ -13,6 +13,29 @@ use quickshare_core::types::{ControlMessage, FileMeta};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 
+fn safe_file_name(name: &str) -> anyhow::Result<String> {
+    let path = std::path::Path::new(name);
+    match (path.components().next(), path.components().nth(1)) {
+        (Some(std::path::Component::Normal(component)), None) => component
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("file name is not valid UTF-8")),
+        _ => anyhow::bail!("unsafe file name: {name}"),
+    }
+}
+
+fn safe_relative_path(root: &std::path::Path, relative: &str) -> anyhow::Result<PathBuf> {
+    let path = std::path::Path::new(relative);
+    if path.as_os_str().is_empty()
+        || !path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("unsafe relative path: {relative}");
+    }
+    Ok(root.join(path))
+}
+
 // -------- Server --------
 async fn run_server(port: u16, save_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
@@ -43,7 +66,7 @@ async fn handle_connection(
         // ── Batch mode ──
         let meta: BatchMeta = serde_json::from_value(first)?;
         let save_root = save_dir.unwrap_or_else(|| std::env::temp_dir());
-        let root_dir = save_root.join(&meta.root_name);
+        let root_dir = save_root.join(safe_file_name(&meta.root_name)?);
 
         let _ack = batch::Ack { ok: true };
         send_json(&mut stream, &_ack).await?;
@@ -61,7 +84,7 @@ async fn handle_connection(
         loop {
             match receiver.recv_file().await? {
                 Some((rel_path, data)) => {
-                    let full_path = root_dir.join(&rel_path);
+                    let full_path = safe_relative_path(&root_dir, &rel_path)?;
                     if let Some(parent) = full_path.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -98,7 +121,7 @@ async fn handle_connection(
         let mut receiver = FileReceiver::from_handshake(stream, file_meta.clone());
 
         let save_path = save_dir.unwrap_or_else(|| std::env::temp_dir());
-        let out_path = save_path.join(&file_meta.name);
+        let out_path = save_path.join(safe_file_name(&file_meta.name)?);
 
         // If compressed, write to a temp file first so we can decompress in-place
         let write_path = if file_meta.compressed {
@@ -146,7 +169,7 @@ async fn handle_connection(
                 let file_count = files.len();
                 let mut total_bytes = 0u64;
                 for (rel_path, data) in files {
-                    let full_path = root_dir.join(&rel_path);
+                    let full_path = safe_relative_path(root_dir, &rel_path)?;
                     if let Some(parent) = full_path.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -201,6 +224,7 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf, compress: bool) -> anyho
         bundle: false,
         stream: false,
         encrypted: false,
+        kdf_salt: [0; 16],
     };
 
     let send_total = send_data.len();
@@ -289,6 +313,7 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
             bundle: true,
             stream: false,
             encrypted: false,
+            kdf_salt: [0; 16],
         };
 
         let start = Instant::now();
@@ -333,6 +358,8 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
         total_files: files.len() as u32,
         total_size,
         root_name,
+        encrypted: false,
+        kdf_salt: [0; 16],
     };
 
     println!("[send-dir] Connecting to {}...", addr);

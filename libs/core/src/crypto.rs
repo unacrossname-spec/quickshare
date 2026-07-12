@@ -3,13 +3,19 @@ use sha2::{Digest, Sha256};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 
-/// Derive a 256-bit AES key from a password using SHA-256.
-/// Salt-less is acceptable because the password is never transmitted —
-/// an attacker cannot perform a rainbow-table attack without the hash.
-pub fn derive_key(password: &str) -> [u8; 32] {
-    let hash = Sha256::digest(password.as_bytes());
+/// Derive a 256-bit AES key from a password.
+///
+/// New transfers use Argon2id with a random, per-transfer salt. The all-zero
+/// salt keeps interoperability with pre-0.4.3 peers that used SHA-256.
+pub fn derive_key(password: &str, salt: &[u8; 16]) -> [u8; 32] {
     let mut key = [0u8; 32];
-    key.copy_from_slice(&hash);
+    if *salt == [0; 16] {
+        key.copy_from_slice(&Sha256::digest(password.as_bytes()));
+    } else {
+        argon2::Argon2::default()
+            .hash_password_into(password.as_bytes(), salt, &mut key)
+            .expect("fixed Argon2 parameters and salt length are valid");
+    }
     key
 }
 

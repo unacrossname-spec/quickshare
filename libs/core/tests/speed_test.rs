@@ -81,6 +81,9 @@ async fn tcp_protocol_loopback_throughput() {
         file_hash: [0u8; 32],
         compressed: false,
         bundle: false,
+        stream: false,
+        encrypted: false,
+        kdf_salt: [0; 16],
     };
     let start = Instant::now();
 
@@ -142,6 +145,9 @@ async fn mt_tcp_protocol_loopback_throughput() {
         file_hash: [0u8; 32],
         compressed: false,
         bundle: false,
+        stream: false,
+        encrypted: false,
+        kdf_salt: [0; 16],
     };
     let start = Instant::now();
 

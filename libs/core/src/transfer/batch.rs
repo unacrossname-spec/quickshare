@@ -10,6 +10,8 @@ use crate::transport::TcpStream;
 const CHUNK_TYPE: u32 = 1;
 const DONE_TYPE: u32 = 0xFFFFFFFF;
 const HDR_SIZE: usize = 56;
+const MAX_JSON_SIZE: usize = 1_000_000;
+const MAX_CHUNK_SIZE: u32 = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Wire protocol types
@@ -20,6 +22,10 @@ pub struct BatchMeta {
     pub total_files: u32,
     pub total_size: u64,
     pub root_name: String,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub kdf_salt: [u8; 16],
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -87,7 +93,10 @@ impl BatchSender {
 
     pub async fn handshake(&mut self) -> Result<()> {
         send_json(&mut self.stream, &self.meta).await?;
-        let _ack: Ack = recv_json(&mut self.stream).await?;
+        let ack: Ack = recv_json(&mut self.stream).await?;
+        if !ack.ok {
+            anyhow::bail!("receiver declined batch transfer");
+        }
         Ok(())
     }
 
@@ -169,6 +178,9 @@ impl BatchReceiver {
             Err(e) => anyhow::bail!(e),
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_JSON_SIZE {
+            anyhow::bail!("batch control message too large: {len} bytes");
+        }
         let mut buf = vec![0u8; len];
         self.stream.read_exact(&mut buf).await?;
 
@@ -191,15 +203,21 @@ impl BatchReceiver {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => anyhow::bail!(e),
             }
-            let (ty, _idx, _off, size, _hash) = parse_header(&hdr);
+            let (ty, idx, _off, size, hash) = parse_header(&hdr);
             if ty == DONE_TYPE {
                 break;
             }
             if ty != CHUNK_TYPE {
                 anyhow::bail!("unknown chunk type: {}", ty);
             }
+            if size > MAX_CHUNK_SIZE {
+                anyhow::bail!("chunk size {size} exceeds max {MAX_CHUNK_SIZE}");
+            }
             let mut chunk = vec![0u8; size as usize];
             self.stream.read_exact(&mut chunk).await?;
+            if *blake3::hash(&chunk).as_bytes() != hash {
+                anyhow::bail!("chunk {idx} hash mismatch");
+            }
             data.extend_from_slice(&chunk);
         }
 

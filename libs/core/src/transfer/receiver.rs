@@ -62,13 +62,7 @@ impl FileReceiver {
     /// Verifies the BLAKE3 hash of received data against the header.
     pub async fn recv_chunk(&mut self) -> Result<Option<(ChunkInfo, Vec<u8>)>> {
         let mut hdr = [0u8; HDR_SIZE];
-        match self.stream.read_exact(&mut hdr).await {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("[recv_chunk] header read error: kind={:?} msg={}", e.kind(), e);
-                return Ok(None);
-            }
-        }
+        self.stream.read_exact(&mut hdr).await?;
 
         let (ty, index, offset, size, hash) = parse_header(&hdr);
         if ty == DONE_TYPE {
@@ -83,13 +77,7 @@ impl FileReceiver {
         }
 
         let mut data = vec![0u8; size as usize];
-        match self.stream.read_exact(&mut data).await {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("[recv_chunk] data read error: kind={:?} msg={}", e.kind(), e);
-                return Ok(None);
-            }
-        }
+        self.stream.read_exact(&mut data).await?;
         self.bytes_received += size as u64;
 
         // Verify chunk integrity
