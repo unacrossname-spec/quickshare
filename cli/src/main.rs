@@ -200,6 +200,7 @@ async fn run_send(addr: SocketAddr, file_path: PathBuf, compress: bool) -> anyho
         compressed: is_compressed,
         bundle: false,
         stream: false,
+        encrypted: false,
     };
 
     let send_total = send_data.len();
@@ -287,6 +288,7 @@ async fn run_send_dir(addr: SocketAddr, dir_path: PathBuf, compress: bool, bundl
             compressed: true,
             bundle: true,
             stream: false,
+            encrypted: false,
         };
 
         let start = Instant::now();

@@ -723,7 +723,13 @@ function setupTauriEvents() {
       maybeNotify('传输完成', `${done[0].file_name} 已发送完毕`);
     }
   });
-  l('receive-complete', async () => {
+  l('receive-complete', async (e) => {
+    // Check for decryption/password errors from the backend
+    const payload = e.payload || {};
+    if (payload.error) {
+      alert('接收失败：' + payload.error);
+    }
+
     const oldDirs = {};
     transfers.forEach(t => { if (t.direction) oldDirs[t.id] = t.direction; });
     try { transfers = await tauriInvoke('get_transfers') || []; } catch {}
