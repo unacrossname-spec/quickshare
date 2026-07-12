@@ -253,6 +253,7 @@ tailwind.config = {
               </div>
               <div class="flex items-center gap-2 shrink-0">
                 <input id="encryption-password" class="bg-surface-container-low border border-outline-variant rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary w-32" type="text" value="" placeholder="输入密码"/>
+                <button id="password-save" class="px-2 py-1.5 text-xs bg-primary text-white rounded-lg hover:opacity-90 transition-opacity" title="保存密码">保存</button>
                 <button id="password-toggle-vis" class="px-2 py-1.5 text-xs text-outline hover:text-on-surface transition-colors" title="显示/隐藏密码">显示</button>
               </div>
             </div>
@@ -273,10 +274,10 @@ tailwind.config = {
         </div>
       </div>
       <footer class="pt-8 border-t border-outline-variant flex justify-between items-center text-xs text-outline">
-        <span>QuickShare v0.2.0</span>
+        <span>QuickShare v0.4.2</span>
         <div class="flex gap-4">
-          <a class="hover:text-primary transition-colors" href="https://github.com/unacrossname-spec/quickshare">项目地址</a>
-          <a class="hover:text-primary transition-colors" href="https://github.com/unacrossname-spec/quickshare">隐私政策</a>
+          <a class="hover:text-primary transition-colors cursor-pointer" data-action="open-url" data-url="https://github.com/unacrossname-spec/quickshare">项目地址</a>
+          <a class="hover:text-primary transition-colors cursor-pointer" data-action="open-url" data-url="https://github.com/unacrossname-spec/quickshare">隐私政策</a>
         </div>
       </footer>
     </div>

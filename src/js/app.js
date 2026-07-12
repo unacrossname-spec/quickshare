@@ -141,6 +141,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       appSettings.password = pwdInput.value;
     });
   }
+  // Save button: explicitly persist password to backend
+  document.getElementById('password-save')?.addEventListener('click', () => {
+    if (!canInvoke()) return;
+    const btn = document.getElementById('password-save');
+    tauriInvoke('update_settings', { appSettings }).then(() => {
+      if (btn) { btn.textContent = '已保存'; setTimeout(() => { btn.textContent = '保存'; }, 1500); }
+    }).catch(() => {
+      if (btn) { btn.textContent = '失败'; setTimeout(() => { btn.textContent = '保存'; }, 1500); }
+    });
+  });
   document.getElementById('password-toggle-vis')?.addEventListener('click', () => {
     const pwd = document.getElementById('encryption-password');
     if (!pwd) return;
@@ -416,6 +426,15 @@ function setupGlobalListeners() {
       // Click is handled by setupDropZone's own listener; no-op here.
       return;
     }
+    const extLink = e.target.closest('[data-action="open-url"]');
+    if (extLink) {
+      e.preventDefault();
+      const url = extLink.dataset.url;
+      if (canInvoke()) {
+        tauriInvoke('plugin:shell|open', { path: url }).catch(() => {});
+      }
+      return;
+    }
     const cancelBtn = e.target.closest('[data-action="cancel-transfer"]');
     if (cancelBtn) { cancelTransfer(cancelBtn.dataset.id); return; }
     const acceptBtn = e.target.closest('[data-action="accept-transfer"]');
@@ -672,6 +691,21 @@ function setupTauriEvents() {
 
     if (currentPage === 'transfers') updateTransferUI();
   });
+  // If notifications are enabled and the tab is not focused, notify the user.
+  function maybeNotify(title, body) {
+    if (!appSettings.notificationsEnabled) return;
+    if (document.hasFocus()) return; // don't notify if user is looking at the app
+    try {
+      if (Notification.permission === 'granted') {
+        new Notification(title, { body, icon: 'icons/128x128.png' });
+      } else if (Notification.permission === 'default') {
+        Notification.requestPermission().then(p => {
+          if (p === 'granted') new Notification(title, { body, icon: 'icons/128x128.png' });
+        });
+      }
+    } catch (_) { /* Notification API not available */ }
+  }
+
   l('transfer-complete', async () => {
     // Preserve direction from local array before re-fetching
     const oldDirs = {};
@@ -683,6 +717,11 @@ function setupTauriEvents() {
     const activeIds = new Set(transfers.map(t => t.id));
     Object.keys(transferSpeeds).forEach(id => { if (!activeIds.has(id)) delete transferSpeeds[id]; });
     if (currentPage === 'transfers') updateTransferUI();
+    // Notify if user isn't looking at the app
+    const done = transfers.filter(x => x.status === 'completed');
+    if (done.length > 0) {
+      maybeNotify('传输完成', `${done[0].file_name} 已发送完毕`);
+    }
   });
   l('receive-complete', async () => {
     const oldDirs = {};
@@ -694,6 +733,10 @@ function setupTauriEvents() {
     Object.keys(transferSpeeds).forEach(id => { if (!activeIds.has(id)) delete transferSpeeds[id]; });
     if (currentPage === 'transfers') updateTransferUI();
     if (currentPage === 'history') renderHistory();
+    const lastRecv = transfers.filter(x => x.direction === 'received' && x.status === 'completed');
+    if (lastRecv.length > 0) {
+      maybeNotify('接收完成', `${lastRecv[0].file_name} 已接收完毕`);
+    }
   });
   // Native file drag-and-drop (handled by Rust → emitted as 'file-dropped')
   l('file-dropped', e => {
