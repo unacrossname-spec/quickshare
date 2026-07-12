@@ -239,20 +239,20 @@ tailwind.config = {
                 <option value="Gbps">Gbps</option>
               </select>
             </label>
-            <label class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant cursor-pointer">
+            <div class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant cursor-pointer">
               <div class="flex items-center gap-3 min-w-0">
                 <span class="material-symbols-outlined text-on-surface-variant shrink-0">lock</span>
                 <div class="min-w-0"><p class="font-medium text-sm truncate">传输加密</p><p class="text-xs text-outline truncate">AES-256-GCM 加密传输</p></div>
               </div>
-              <span class="toggle on" data-setting="encrypted"></span>
-            </label>
+              <span class="toggle" data-setting="encrypted"></span>
+            </div>
             <div id="encryption-password-row" class="flex items-center justify-between p-4 bg-surface-container-lowest rounded-2xl border border-outline-variant">
               <div class="flex items-center gap-3 min-w-0">
                 <span class="material-symbols-outlined text-on-surface-variant shrink-0">key</span>
                 <div class="min-w-0"><p class="font-medium text-sm truncate">加密密码</p><p class="text-xs text-outline truncate">两端需设置相同密码</p></div>
               </div>
               <div class="flex items-center gap-2 shrink-0">
-                <input id="encryption-password" class="bg-surface-container-low border border-outline-variant rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary w-32" type="password" value="" placeholder="输入密码"/>
+                <input id="encryption-password" class="bg-surface-container-low border border-outline-variant rounded-lg px-3 py-1.5 text-sm outline-none focus:border-primary w-32" type="text" value="" placeholder="输入密码"/>
                 <button id="password-toggle-vis" class="px-2 py-1.5 text-xs text-outline hover:text-on-surface transition-colors" title="显示/隐藏密码">显示</button>
               </div>
             </div>

@@ -93,6 +93,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       appSettings.password = settingsResult.password || '';
       syncSettingsUI();
       syncPortInput();
+    } else {
+      // Backend unavailable — use defaults (encrypted is already false)
+      syncSettingsUI();
     }
   }
 
@@ -122,13 +125,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Encryption password field
+  // Encryption password field — password is stored locally and sent
+  // with the transfer request, NOT saved to backend settings on every keystroke.
   syncPasswordUI();
   const pwdInput = document.getElementById('encryption-password');
   if (pwdInput) {
     pwdInput.addEventListener('input', () => {
       appSettings.password = pwdInput.value;
-      if (canInvoke()) tauriInvoke('update_settings', { appSettings }).catch(() => {});
     });
   }
   document.getElementById('password-toggle-vis')?.addEventListener('click', () => {
@@ -334,7 +337,7 @@ function handleFilePath(filePath, fileSize, fileName) {
 
   console.log('[handleFilePath] invoking send_files...');
   tauriInvoke('send_files', {
-    opts: { addr: selectedTarget, path: filePath, compress: appSettings.compress, bundle: appSettings.bundle, encrypted: appSettings.encrypted }
+    opts: { addr: selectedTarget, path: filePath, compress: appSettings.compress, bundle: appSettings.bundle, encrypted: appSettings.encrypted, password: appSettings.password }
   }).then(realId => {
     console.log('[handleFilePath] send_files returned:', realId);
     if (realId) {
@@ -365,8 +368,14 @@ function setupGlobalListeners() {
       const setting = toggle.dataset.setting;
       if (setting && setting in appSettings) {
         appSettings[setting] = toggle.classList.contains('on');
-        if (canInvoke()) tauriInvoke('update_settings', { appSettings });
-        if (setting === 'encrypted') syncPasswordUI();
+        if (canInvoke()) {
+          // Defer IPC to next macrotask so CSS transition + render can
+          // complete first — avoids a WebKitGTK compositor freeze when
+          // the toggle pseudo-element animation is still running.
+          setTimeout(() => {
+            tauriInvoke('update_settings', { appSettings }).catch(() => {});
+          }, 0);
+        }
       }
       return;
     }
@@ -601,9 +610,6 @@ function syncSpeedUnitUI() {
 function syncPasswordUI() {
   const pwd = document.getElementById('encryption-password');
   if (pwd) pwd.value = appSettings.password || '';
-  // Show/hide password row based on encrypted toggle
-  const row = document.getElementById('encryption-password-row');
-  if (row) row.style.display = appSettings.encrypted ? '' : 'none';
 }
 
 // ── Tauri Events ──

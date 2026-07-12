@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, WebviewEvent};
@@ -75,6 +75,8 @@ pub struct SendOptions {
     pub compress: bool,
     pub bundle: bool,
     pub encrypted: bool,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,11 +174,6 @@ fn load_state_file() -> (Vec<HistoryRecord>, AppSettings) {
 }
 
 fn save_state_file(history: &[HistoryRecord], settings: &AppSettings) {
-    // Serialize writes with a global lock to prevent concurrent-write races.
-    use std::sync::OnceLock;
-    static SAVE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    let _guard = SAVE_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap();
-
     #[derive(Serialize)]
     struct Persisted<'a> {
         history: &'a [HistoryRecord],
@@ -256,7 +253,7 @@ async fn send_single(
 
     let tid = uuid::Uuid::new_v4().to_string();
     register_transfer(&state, &tid, &file_name, file_size).await;
-    let data_password = state.settings.lock().await.password.clone();
+    let data_password = if opts.encrypted { opts.password.clone() } else { String::new() };
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
@@ -440,9 +437,16 @@ async fn update_settings(
         *state.save_dir.lock().await = p;
     }
     if let Some(s) = app_settings {
+        let hist = state.history.lock().await.clone();
         *state.settings.lock().await = s.clone();
-        save_state_file(&state.history.lock().await, &s);
+        save_state_file(&hist, &s);
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn debug_log(msg: String) -> Result<(), String> {
+    eprintln!("[js-debug] {msg}");
     Ok(())
 }
 
@@ -1558,6 +1562,7 @@ pub fn run() {
             scan_devices,
             pick_file,
             pick_folder,
+            debug_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
