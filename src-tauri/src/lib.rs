@@ -58,6 +58,8 @@ pub struct AppState {
     /// Generation counter for debounced saves — each update_settings call
     /// increments it; only the latest generation writes to disk.
     pub save_gen: Arc<AtomicU64>,
+    /// Server restart signal (emitted when port changes).
+    pub server_restart: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +71,8 @@ pub struct TransferState {
     pub status: String,
     #[serde(skip_serializing)]
     pub started_at: u64,
+    #[serde(skip_serializing)]
+    pub file_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +105,8 @@ pub struct HistoryRecord {
     pub timestamp: String,
     #[serde(default)]
     pub speed: f64,
+    #[serde(default)]
+    pub file_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,16 +307,21 @@ async fn send_directory(
     state.cancel_flags.lock().await.insert(tid.clone(), cancel.clone());
     drop(state);
 
+    let encrypted = opts.encrypted;
+    let password = if encrypted { opts.password.clone() } else { String::new() };
+
     if bundle {
         let tid2 = tid.clone();
+        let pwd = password.clone();
         tauri::async_runtime::spawn(async move {
-            let r = do_send_bundle(addr, dir_path, files, &root_name, &app, &tid2, cancel).await;
+            let r = do_send_bundle(addr, dir_path, files, &root_name, &app, &tid2, cancel, encrypted, &pwd).await;
             finish_transfer(&app, &tid2, r).await;
         });
     } else {
         let tid2 = tid.clone();
+        let pwd = password.clone();
         tauri::async_runtime::spawn(async move {
-            let r = do_send_batch(addr, dir_path, files, compress, &app, &tid2, cancel).await;
+            let r = do_send_batch(addr, dir_path, files, compress, &app, &tid2, cancel, encrypted, &pwd).await;
             finish_transfer(&app, &tid2, r).await;
         });
     }
@@ -440,8 +451,14 @@ async fn update_settings(
         *state.save_dir.lock().await = p;
     }
     if let Some(s) = app_settings {
+        let old_port = state.settings.lock().await.port;
         let hist = state.history.lock().await.clone();
         *state.settings.lock().await = s.clone();
+
+        // Restart TCP server if port changed
+        if s.port != old_port {
+            state.server_restart.notify_one();
+        }
 
         // Debounce: only the most recent generation writes to disk.
         // Rapid successive calls to update_settings skip intermediate writes.
@@ -604,39 +621,58 @@ fn guess_broadcast(ip: &str) -> Option<String> {
 // ── Background Server ──
 
 pub async fn run_server(app: AppHandle) {
-    let port = app.state::<AppState>().settings.lock().await.port;
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[server] bind {addr}: {e}");
-            return;
-        }
-    };
-    let _ = app.emit("server-ready", true);
+    let restart_notify = Arc::clone(&app.state::<AppState>().server_restart);
 
-    loop {
+    'outer: loop {
         if app.state::<AppState>().server_shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let stream = match tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            listener.accept(),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            _ => continue,
-        };
-        let peer = stream.peer_addr().unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
-        let app_c = app.clone();
-        let save_dir = app.state::<AppState>().save_dir.lock().await.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_incoming(stream, save_dir, &app_c, peer).await {
-                eprintln!("[server] {e}");
+        let port = app.state::<AppState>().settings.lock().await.port;
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = match TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[server] bind {addr}: {e}");
+                // Wait before retrying in case of transient error
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
             }
-        });
+        };
+        let _ = app.emit("server-ready", true);
+        eprintln!("[server] listening on {addr}");
+
+        loop {
+            if app.state::<AppState>().server_shutdown.load(Ordering::SeqCst) {
+                break 'outer;
+            }
+
+            tokio::select! {
+                // Port-change notification — rebind
+                _ = restart_notify.notified() => {
+                    eprintln!("[server] restart signal received, rebinding...");
+                    break; // break inner loop to rebind
+                }
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    listener.accept(),
+                ) => {
+                    match result {
+                        Ok(Ok(s)) => {
+                            let peer = s.peer_addr().unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
+                            let app_c = app.clone();
+                            let save_dir = app.state::<AppState>().save_dir.lock().await.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_incoming(s, save_dir, &app_c, peer).await {
+                                    eprintln!("[server] {e}");
+                                }
+                            });
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -730,6 +766,7 @@ async fn handle_incoming(
             sent: 0,
             status: "pending".into(),
             started_at: 0,
+            file_hash: String::new(),
         });
     }
 
@@ -813,6 +850,13 @@ async fn handle_incoming(
         None
     };
 
+    // Full-file hash accumulator for received data
+    let mut file_hasher: Option<blake3::Hasher> = if streaming {
+        Some(blake3::Hasher::new())
+    } else {
+        None
+    };
+
     loop {
         // Check if transfer was cancelled
         if app.state::<AppState>().cancel_flags.lock().await.get(&tid_str).map_or(false, |f| f.load(Ordering::SeqCst)) {
@@ -836,6 +880,10 @@ async fn handle_incoming(
                     };
                     let decompressed = quickshare_core::compress::decompress(&decrypted)
                         .map_err(|e| anyhow::anyhow!("decompress chunk: {e}"))?;
+                    // Update full-file hash with decompressed data
+                    if let Some(ref mut h) = file_hasher {
+                        h.update(&decompressed);
+                    }
                     of.write_all(&decompressed).await?;
                     recvd += decompressed.len() as u64;
                 } else {
@@ -871,6 +919,13 @@ async fn handle_incoming(
         of.shutdown().await?;
     }
     if streaming {
+        // Store file hash in transfer state
+        if let Some(h) = file_hasher {
+            let hash_hex = h.finalize().to_hex().to_string();
+            if let Some(st) = app.state::<AppState>().transfers.lock().await.iter_mut().find(|t| t.id == tid_str) {
+                st.file_hash = hash_hex;
+            }
+        }
         tmp_guard.disarm(); // no tmp file was created
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
@@ -893,7 +948,7 @@ async fn handle_incoming(
 
         // Process received data (bundle, compressed, or single file)
         if meta.bundle {
-            let data = if meta.compressed {
+            let mut data = if meta.compressed {
                 let raw = std::fs::read(&tmp).map_err(|e| anyhow::anyhow!("read tmp for bundle: {e}"))?;
                 tmp_guard.disarm();
                 tokio::fs::remove_file(&tmp).await.map_err(|e| anyhow::anyhow!("remove tmp for bundle: {e}"))?;
@@ -904,6 +959,12 @@ async fn handle_incoming(
                 tokio::fs::remove_file(&tmp).await?;
                 raw
             };
+            // Decrypt if sender used encryption
+            if meta.encrypted {
+                let key = dec_key.as_ref().ok_or_else(|| anyhow::anyhow!("encrypted bundle but no local password set"))?;
+                data = quickshare_core::crypto::decrypt(key, &data)
+                    .map_err(|e| anyhow::anyhow!("bundle decrypt failed (wrong password?): {e}"))?;
+            }
             let root = save_dir.join(&meta.name);
             tokio::fs::create_dir_all(&root).await?;
             let files = quickshare_core::bundle::extract_bundle(&data)?;
@@ -935,7 +996,13 @@ async fn handle_incoming(
         let raw = std::fs::read(&tmp)?;
         tmp_guard.disarm();
         tokio::fs::remove_file(&tmp).await?;
-        let data = quickshare_core::compress::decompress(&raw)?;
+        let mut data = quickshare_core::compress::decompress(&raw)?;
+        // Decrypt if sender used encryption
+        if meta.encrypted {
+            let key = dec_key.as_ref().ok_or_else(|| anyhow::anyhow!("encrypted file but no local password set"))?;
+            data = quickshare_core::crypto::decrypt(key, &data)
+                .map_err(|e| anyhow::anyhow!("decrypt failed (wrong password?): {e}"))?;
+        }
         let out = save_dir.join(&meta.name);
         tokio::fs::write(&out, &data).await?;
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
@@ -949,8 +1016,19 @@ async fn handle_incoming(
         );
         } else {
         let out = save_dir.join(&meta.name);
-        tmp_guard.disarm();
-        tokio::fs::rename(&tmp, &out).await.map_err(|e| anyhow::anyhow!("rename tmp: {e}"))?;
+        // Decrypt if sender used encryption (uncompressed plain file)
+        if meta.encrypted {
+            let key = dec_key.as_ref().ok_or_else(|| anyhow::anyhow!("encrypted file but no local password set"))?;
+            let raw = std::fs::read(&tmp).map_err(|e| anyhow::anyhow!("read tmp for decrypt: {e}"))?;
+            tmp_guard.disarm();
+            tokio::fs::remove_file(&tmp).await?;
+            let decrypted = quickshare_core::crypto::decrypt(key, &raw)
+                .map_err(|e| anyhow::anyhow!("decrypt failed (wrong password?): {e}"))?;
+            tokio::fs::write(&out, &decrypted).await?;
+        } else {
+            tmp_guard.disarm();
+            tokio::fs::rename(&tmp, &out).await.map_err(|e| anyhow::anyhow!("rename tmp: {e}"))?;
+        }
         finish_receive(app, &tid_str, &peer_str, &meta.name, meta.size, true).await;
         let _ = app.emit(
             "receive-complete",
@@ -1076,12 +1154,18 @@ async fn do_send_file_streaming(
         None
     };
 
+    // Full-file hash accumulator (hashes original uncompressed data)
+    let mut file_hasher = blake3::Hasher::new();
+
     for chunk in reader {
         if cancel.load(Ordering::SeqCst) {
             return Err("cancelled".into());
         }
         let c = chunk.map_err(|e| format!("chunk: {e}"))?;
         let chunk_len = c.data.len() as u64;
+
+        // Full-file hash: hash the ORIGINAL data (before compression/encryption)
+        file_hasher.update(&c.data);
 
         // Compress each chunk independently if compression is enabled.
         // Always produce a valid LZ4 frame so the receiver can decompress it.
@@ -1135,6 +1219,8 @@ async fn do_send_bundle(
     app: &AppHandle,
     tid: &str,
     cancel: Arc<AtomicBool>,
+    encrypted: bool,
+    password: &str,
 ) -> Result<(), String> {
     if cancel.load(Ordering::SeqCst) {
         return Err("cancelled".into());
@@ -1148,21 +1234,30 @@ async fn do_send_bundle(
     }
 
     let bundle = quickshare_core::bundle::create_bundle(&entries);
+    let bundle_size = bundle.len() as u64;
     let compressed = quickshare_core::compress::compress(&bundle);
+    let is_compressed = compressed.len() < bundle.len();
+
+    // Apply encryption after compression (or on raw bundle if not compressed)
+    let mut payload = if is_compressed { compressed } else { bundle };
+    if encrypted {
+        let key = quickshare_core::crypto::derive_key(password);
+        payload = quickshare_core::crypto::encrypt(&key, &payload);
+    }
 
     let file_meta = FileMeta {
         name: root_name.to_string(),
-        size: bundle.len() as u64,
+        size: bundle_size,
         chunk_size: CHUNK_SIZE,
-        chunk_count: (compressed.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
+        chunk_count: (payload.len() + CHUNK_SIZE - 1) as u64 / CHUNK_SIZE as u64,
         file_hash: [0u8; 32],
-        compressed: compressed.len() < bundle.len(),
+        compressed: is_compressed,
         bundle: true,
         stream: false,
-        encrypted: false,
+        encrypted,
     };
 
-    do_send_file(addr, file_meta, &compressed, app, tid, cancel).await
+    do_send_file(addr, file_meta, &payload, app, tid, cancel).await
 }
 
 async fn do_send_batch(
@@ -1173,6 +1268,8 @@ async fn do_send_batch(
     app: &AppHandle,
     tid: &str,
     cancel: Arc<AtomicBool>,
+    encrypted: bool,
+    password: &str,
 ) -> Result<(), String> {
     let total: u64 = files.iter().map(|(_, s)| s).sum();
     let root = dir_path
@@ -1207,7 +1304,11 @@ async fn do_send_batch(
             return Err("cancelled".into());
         }
         let full = dir_path.join(&rel);
-        let data = std::fs::read(&full).map_err(|e| format!("read: {e}"))?;
+        let mut data = std::fs::read(&full).map_err(|e| format!("read: {e}"))?;
+        if encrypted {
+            let key = quickshare_core::crypto::derive_key(password);
+            data = quickshare_core::crypto::encrypt(&key, &data);
+        }
         sender
             .send_file(rel.to_string_lossy().as_ref(), &data)
             .await
@@ -1236,6 +1337,7 @@ async fn register_transfer(state: &AppState, id: &str, name: &str, total: u64) {
         sent: 0,
         status: "active".into(),
         started_at: chrono_now_ms(),
+        file_hash: String::new(),
     });
 }
 
@@ -1257,6 +1359,7 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
         let elapsed = std::cmp::max(chrono_now_ms().saturating_sub(t.started_at), 1);
         let speed = (t.total as f64) / (elapsed as f64 / 1000.0);
 
+        let file_hash = t.file_hash.clone();
         let record = HistoryRecord {
             id: t.id.clone(),
             file_name: t.file_name.clone(),
@@ -1266,6 +1369,7 @@ async fn finish_transfer(app: &AppHandle, id: &str, result: Result<(), String>) 
             status: status.to_string(),
             timestamp: chrono_now(),
             speed,
+            file_hash,
         };
         let mut hist = state.history.lock().await;
         hist.insert(0, record);
@@ -1310,6 +1414,7 @@ async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, 
         }));
     }
     // Record in history
+    let file_hash = transfers.iter().find(|t| t.id == id).map(|t| t.file_hash.clone()).unwrap_or_default();
     let record = HistoryRecord {
         id: id.to_string(),
         file_name: file_name.to_string(),
@@ -1319,6 +1424,7 @@ async fn finish_receive(app: &AppHandle, id: &str, peer: &str, file_name: &str, 
         status: if success { "completed".to_string() } else { "failed".to_string() },
         timestamp: chrono_now(),
         speed,
+        file_hash,
     };
     let mut hist = state.history.lock().await;
     hist.insert(0, record);
@@ -1488,6 +1594,7 @@ pub fn run() {
         discovery_running: Arc::new(AtomicBool::new(false)),
         pending_requests: Arc::new(Mutex::new(HashMap::new())),
         save_gen: Arc::new(AtomicU64::new(0)),
+        server_restart: Arc::new(tokio::sync::Notify::new()),
     };
 
     tauri::Builder::default()
@@ -1497,7 +1604,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let disc_handle = handle.clone();
-            let scan_handle = handle.clone();
+            let _scan_handle = handle.clone();
 
             // Set up native file drag-and-drop handler.
             // Tauri's webview emits DragDrop events; we forward them to the

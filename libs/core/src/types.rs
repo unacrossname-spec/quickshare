@@ -82,10 +82,6 @@ pub enum ControlMessage {
         transfer_id: TransferId,
         reason: String,
     },
-    ChunkAck {
-        transfer_id: TransferId,
-        chunk_index: u64,
-    },
     TransferDone {
         transfer_id: TransferId,
     },

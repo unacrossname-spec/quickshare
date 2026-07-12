@@ -18,7 +18,13 @@ function tauriListen(evt, cb) {
     event: evt,
     target: { kind: 'Any' },
     handler,
-  }).catch(e => console.error('[tauriListen] failed:', evt, e));
+  }).catch(e => {
+    console.error('[tauriListen] failed:', evt, e);
+    // Critical failure — without event listeners the app can't receive
+    // transfer progress or incoming transfer requests.
+    const st = document.getElementById('init-status');
+    if (st) st.textContent = '事件监听失败，请重启应用';
+  });
 }
 function canInvoke() { return !!window.__TAURI_INTERNALS__?.invoke; }
 
@@ -40,6 +46,7 @@ let appSettings = {
 
 // ── Transfer speed tracking ──
 let transferSpeeds = {}; // id → {lastBytes, lastTime, bytesPerSec}
+let pendingProgress = {}; // realId → {sent, total} — buffered progress for in-flight sends
 let speedUnit = localStorage.getItem('qs_speedUnit') || 'MB/s';
 
 // ── Init ──
@@ -200,6 +207,9 @@ async function scanDevices() {
   const timeout = new Promise(r => setTimeout(() => r('timeout'), 5000));
   const result = await Promise.race([scan, timeout]);
   const devices = result === 'timeout' ? [] : result;
+  if (result === 'timeout') {
+    if (hint) hint.textContent = '扫描超时，请检查网络连接后重试';
+  }
 
   knownPeers = devices.map(d => ({
     name: d.name,
@@ -342,8 +352,23 @@ function handleFilePath(filePath, fileSize, fileName) {
     console.log('[handleFilePath] send_files returned:', realId);
     if (realId) {
       const t = transfers.find(x => x.id === tempId);
-      if (t) t.id = realId;
+      if (t) {
+        t.id = realId;
+        // Replay any progress that arrived before we knew the real ID
+        if (pendingProgress[realId]) {
+          const p = pendingProgress[realId];
+          t.sent = p.sent;
+          t.total = p.total;
+          delete pendingProgress[realId];
+        }
+      }
+      // Speed tracking: remap from tempId to realId
+      if (transferSpeeds[tempId]) {
+        transferSpeeds[realId] = transferSpeeds[tempId];
+        delete transferSpeeds[tempId];
+      }
     }
+    updateTransferUI();
   }).catch(e => {
     console.error('send failed:', e);
     delete transferSpeeds[tempId];
@@ -456,7 +481,7 @@ function cancelTransfer(id) {
 
 // ── Transfer UI ──
 function updateTransferUI() {
-  const container = document.getElementById('transfer-cards-container');
+  const container = document.getElementById('transfer-cards');
   const empty = document.getElementById('transfer-empty');
   const active = document.getElementById('active-transfer');
   const pending = document.getElementById('transfer-pending');
@@ -525,8 +550,7 @@ function updateTransferUI() {
           : `<div class="progress-bar"><div class="progress-bar-fill ${barColor}" style="width:${pct}%"></div></div>
             <div class="mt-2 flex justify-between items-center text-xs text-outline">
               <span class="${textColor} font-medium">${pct}%</span>
-              <span class="cursor-pointer hover:text-on-surface transition-colors"
-                    title="点击切换单位">${fmtSpeed(transferSpeeds[t.id]?.bytesPerSec || 0)}</span>
+              <span>${fmtSpeed(transferSpeeds[t.id]?.bytesPerSec || 0)}</span>
               <span>${fmtSize(t.sent)} / ${fmtSize(t.total)}</span>
             </div>`
         }
@@ -621,7 +645,13 @@ function setupTauriEvents() {
   l('transfer-progress', e => {
     const { id, sent, total } = e.payload;
     const t = transfers.find(x => x.id === id);
-    if (t) { t.sent = sent; t.total = total; }
+    if (t) {
+      t.sent = sent; t.total = total;
+    } else {
+      // Buffer progress for in-flight sends whose real UUID isn't known yet
+      pendingProgress[id] = { sent, total };
+      return;
+    }
 
     // Speed tracking
     const now = performance.now();
@@ -839,14 +869,6 @@ function fmtSpeed(bytesPerSec) {
   if (val < 10) return val.toFixed(2) + ' ' + unit.key;
   if (val < 100) return val.toFixed(1) + ' ' + unit.key;
   return Math.round(val) + ' ' + unit.key;
-}
-
-function cycleSpeedUnit() {
-  const keys = SPEED_UNITS.map(u => u.key);
-  const idx = keys.indexOf(speedUnit);
-  speedUnit = keys[(idx + 1) % keys.length];
-  localStorage.setItem('qs_speedUnit', speedUnit);
-  if (currentPage === 'transfers') updateTransferUI();
 }
 
 function fmtSize(bytes) {

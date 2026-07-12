@@ -9,6 +9,9 @@ use crate::transfer::sender::{recv_json, send_json};
 const HDR_SIZE: usize = 56;
 const CHUNK_TYPE: u32 = 1;
 const DONE_TYPE: u32 = 0xFFFFFFFF;
+/// Maximum chunk data size on wire (8 MiB) — protects against malicious
+/// peers that could claim a 4 GB chunk and trigger an OOM allocation.
+const MAX_CHUNK_SIZE: u32 = 8 * 1024 * 1024;
 
 fn parse_header(buf: &[u8; HDR_SIZE]) -> (u32, u64, u64, u32, [u8; 32]) {
     let ty = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -73,6 +76,10 @@ impl FileReceiver {
         }
         if ty != CHUNK_TYPE {
             anyhow::bail!("unknown chunk type: {}", ty);
+        }
+
+        if size > MAX_CHUNK_SIZE {
+            anyhow::bail!("chunk size {size} exceeds max {MAX_CHUNK_SIZE}");
         }
 
         let mut data = vec![0u8; size as usize];
